@@ -1,6 +1,6 @@
 // @ts-nocheck
 (function() {
-    console.log("✨ [绝密档案馆] 独立置顶版已启动！");
+    console.log("✨ [绝密档案馆] 终极组内置顶版已启动！");
 
     setInterval(function() {
         const items = Array.from(document.querySelectorAll('.recentChat'));
@@ -23,7 +23,7 @@
             if (tags.length > 0) domTags[name] = tags;
         });
 
-        // 🚨 核心：咱们自己的置顶记录（用聊天的文件名作为唯一标识）
+        // 咱们自己的置顶记录
         const pinnedChats = JSON.parse(localStorage.getItem('archive_pinned_chats') || '{}');
 
         // 2. 提取数据
@@ -43,20 +43,16 @@
             let statsEl = item.querySelector('.chatStats');
             let statsHtml = statsEl ? statsEl.outerHTML : '';
             
-            let pinNode = item.querySelector('.pinChat');
             let renameNode = item.querySelector('.renameChat');
             let deleteNode = item.querySelector('.deleteChat');
             
-            // 拿聊天的唯一文件名为 key
             let fileKey = item.getAttribute('data-file') || chatTitle;
-            
-            // 状态判断：如果咱们本地存了，就点亮
             let isPinned = pinnedChats[fileKey] === true;
 
             if (!grouped[charName]) grouped[charName] = { chats: [], tags: domTags[charName] || [], lastTime: 0 };
             grouped[charName].chats.push({ 
                 fileKey: fileKey, title: chatTitle, date: dateStr, avatar: avatarImg, 
-                statsHtml: statsHtml, pinNode, renameNode, deleteNode, originalNode: item,
+                statsHtml: statsHtml, renameNode, deleteNode, originalNode: item,
                 isPinned: isPinned
             });
             grouped[charName].lastTime = Math.max(grouped[charName].lastTime, timeStamp);
@@ -107,6 +103,13 @@
         const pinnedChars = JSON.parse(localStorage.getItem('archive_pinned') || '[]');
         
         Object.entries(grouped).forEach(([charName, data]) => {
+            // 🚨 核心：渲染前，先把该角色下已经置顶的记录拎到最前面
+            data.chats.sort((a, b) => {
+                if (a.isPinned && !b.isPinned) return -1;
+                if (!a.isPinned && b.isPinned) return 1;
+                return 0;
+            });
+
             const groupDiv = document.createElement('div');
             groupDiv.className = 'my-fold-group';
             groupDiv.setAttribute('data-name', charName.toLowerCase());
@@ -194,14 +197,11 @@
 
                 const btns = chatItem.querySelectorAll('.action-group i');
                 
-                // 🚨 手动接管置顶逻辑
+                // 🚨 组内置顶逻辑：完全脱离原生
                 btns[0].addEventListener('click', (e) => { 
                     e.stopPropagation(); 
                     
-                    // 1. 触发原生置顶
-                    if(chat.pinNode) chat.pinNode.click(); 
-                    
-                    // 2. 更新咱们自己的记忆
+                    // 1. 更新咱们自己的记忆
                     let currentPinnedChats = JSON.parse(localStorage.getItem('archive_pinned_chats') || '{}');
                     let newState = !currentPinnedChats[chat.fileKey];
                     
@@ -212,9 +212,16 @@
                     }
                     localStorage.setItem('archive_pinned_chats', JSON.stringify(currentPinnedChats));
 
-                    // 3. 立刻反转 UI（不等原生刷新）
-                    chatItem.classList.toggle('is-pinned-row');
-                    btns[0].classList.toggle('pinned');
+                    // 2. 立刻反转 UI
+                    chatItem.classList.toggle('is-pinned-row', newState);
+                    btns[0].classList.toggle('pinned', newState);
+
+                    // 3. 🚨 实时的 DOM 移动
+                    if (newState) {
+                        contentInner.prepend(chatItem); // 置顶：直接飞到最前
+                    } else {
+                        contentInner.appendChild(chatItem); // 取消置顶：扔回最后
+                    }
                 });
                 
                 btns[1].addEventListener('click', (e) => { e.stopPropagation(); if(chat.renameNode) chat.renameNode.click(); });

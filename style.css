@@ -5,14 +5,28 @@
 #my-folded-wrapper { padding: 0 12px !important; }
 
 .my-fold-group {
-    background: rgba(var(--SmartThemeBlurTintColor), 0.4) !important;
-    backdrop-filter: blur(5px);
+    /* 1. 去掉背景和四周的框 */
+    background: transparent !important;
+    backdrop-filter: none !important;
     border: none !important;
-    border-left: 3px solid #a45050 !important; 
     border-radius: 0 !important;
-    margin-bottom: 16px !important;
-    box-shadow: none !important;
-    overflow: hidden;
+    
+    /* 2. 保留左侧的暗红封条 */
+    border-left: 3px solid #a45050 !important; 
+    
+    /* 3. 保留下边框的灰色分割线 */
+    border-bottom: 1px solid rgba(128, 128, 128, 0.3) !important;
+    
+    /* 4. 核心：极轻微的底部投影。
+       0 6px 12px -8px 意思是：向下偏移6px，模糊12px，向内收缩8px（防止向四周扩散），极浅的透明度。 */
+    box-shadow: 0 6px 12px -8px rgba(0, 0, 0, 0.15) !important;
+    
+    /* 5. 调整间距和留白 */
+    margin-bottom: 20px !important; 
+    padding-bottom: 10px !important; 
+    padding-left: 10px !important; 
+    
+    overflow: visible; /* 必须设为 visible，不然阴影会被切掉 */
 }
 
 .my-fold-header {
@@ -148,4 +162,15 @@
 /* 图钉的暗红状态 */
 .chat-pin-btn.pinned { 
     color: #a45050 !important; 
+}
+
+/* 1. 给聊天记录之间加一条纯色的细线 */
+.my-fold-content .recentChat {
+    border-bottom: 1px solid rgba(128, 128, 128, 0.3) !important; 
+    box-shadow: none !important; /* 确保没有任何阴影 */
+}
+
+/* 2. 最后一条记录不需要下划线，避免和外层的底边撞车 */
+.my-fold-content .recentChat:last-child {
+    border-bottom: none !important;
 }
