@@ -1,0 +1,10 @@
+{
+    "display_name": "ST-档案馆 (ST-Archive)",
+    "loading_order": 100,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "lliysp和deepseek", 
+    "version": "1.0.0"
+}

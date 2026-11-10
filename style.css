@@ -1,0 +1,151 @@
+/* ==================================================
+   ST-Archive (绝密档案馆) - 终极完美版
+   ================================================== */
+
+#my-folded-wrapper { padding: 0 12px !important; }
+
+.my-fold-group {
+    background: rgba(var(--SmartThemeBlurTintColor), 0.4) !important;
+    backdrop-filter: blur(5px);
+    border: none !important;
+    border-left: 3px solid #a45050 !important; 
+    border-radius: 0 !important;
+    margin-bottom: 16px !important;
+    box-shadow: none !important;
+    overflow: hidden;
+}
+
+.my-fold-header {
+    background: transparent !important;
+    border-bottom: 1px solid var(--SmartThemeBorderColor) !important; 
+    padding: 12px 16px !important;
+    color: var(--SmartThemeBodyColor) !important;
+    cursor: pointer;
+    display: flex !important;
+    justify-content: space-between !important;
+    align-items: center !important;
+    user-select: none;
+}
+.my-fold-group.is-open .my-fold-header .icon { transform: rotate(90deg); }
+.my-fold-header .icon { color: #a45050 !important; margin-right: 8px; transition: transform 0.3s; display: inline-block; }
+
+.my-fold-header-left {
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: flex-start !important;
+    justify-content: center !important;
+    flex: 1 !important;
+    min-width: 0 !important;
+    gap: 6px;
+}
+.my-name-row { display: flex; align-items: center; width: 100%; }
+.my-header-name { 
+    white-space: nowrap !important; flex-shrink: 0 !important; 
+    font-size: 15px !important; color: var(--SmartThemeBodyColor) !important; 
+    font-weight: 600; letter-spacing: 2px; 
+    font-family: 'Noto Serif SC', 'Songti SC', 'SimSun', 'Courier New', serif; 
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.05); 
+}
+.my-header-tags {
+    display: flex !important; flex-direction: row !important; flex-wrap: wrap !important;
+    gap: 4px !important; width: 100% !important; padding-left: 20px; 
+}
+.my-tag { 
+    background: rgba(128, 128, 128, 0.15) !important; color: var(--SmartThemeBodyColor) !important; 
+    border: 1px solid var(--SmartThemeBorderColor) !important; font-size: 10px !important; 
+    padding: 1px 6px !important; border-radius: 4px !important; white-space: nowrap !important; 
+    font-weight: normal !important; display: inline-block !important; 
+}
+
+.my-fold-header-right { display: flex; align-items: center; flex-shrink: 0; }
+.my-pin-btn { cursor: pointer; color: rgba(var(--SmartThemeBodyColor), 0.4); transition: color 0.2s, transform 0.2s; }
+.my-pin-btn:hover { transform: scale(1.2); }
+.my-pin-btn.pinned { color: #a45050; }
+
+/* 🚨 稳妥显隐 */
+.my-fold-content { display: none; padding: 0 !important; }
+.my-fold-group.is-open .my-fold-content { display: block !important; }
+
+/* 聊天条目：加上强制 flex 防止意外隐藏 */
+.my-fold-content .recentChat { 
+    display: flex !important; flex-direction: row !important; align-items: center !important; 
+    padding: 10px 16px !important; border-bottom: 1px solid var(--SmartThemeBorderColor) !important; 
+    width: 100% !important; box-sizing: border-box !important; background: transparent !important; 
+    cursor: pointer; transition: background 0.2s; 
+}
+.my-fold-content .recentChat:hover { background: rgba(128, 128, 128, 0.1) !important; }
+.my-fold-content .recentChat .avatar { flex: 0 0 40px !important; width: 40px !important; height: 40px !important; margin: 0 12px 0 0 !important; padding: 0 !important; border-radius: 6px !important; overflow: hidden !important; display: block !important; }
+.my-fold-content .recentChat .avatar img { width: 100% !important; height: 100% !important; object-fit: cover !important; }
+.my-fold-content .recentChat .recentChatInfo { flex: 1 !important; display: flex !important; flex-direction: column !important; align-items: flex-start !important; justify-content: center !important; min-width: 0 !important; overflow: hidden !important; }
+.my-fold-content .recentChat .chatNameContainer { display: flex !important; flex-direction: row !important; align-items: center !important; width: 100% !important; min-width: 0 !important; margin-bottom: 4px !important; }
+.my-fold-content .recentChat .chatName { flex: 1 !important; display: flex !important; white-space: nowrap !important; overflow: hidden !important; text-overflow: ellipsis !important; min-width: 0 !important; font-size: 14px !important; color: var(--SmartThemeBodyColor) !important; font-weight: 600 !important; }
+.my-fold-content .recentChat .chatDate { flex-shrink: 0 !important; margin: 0 10px !important; color: rgba(var(--SmartThemeBodyColor), 0.5) !important; font-size: 12px !important; }
+.my-fold-content .recentChat .chatActions { display: flex !important; gap: 4px !important; opacity: 0.3 !important; }
+.my-fold-content .recentChat:hover .chatActions { opacity: 1 !important; }
+.my-fold-content .recentChat .chatMessageContainer { display: flex !important; width: 100% !important; min-width: 0 !important; }
+.my-fold-content .recentChat .chatMessage { flex: 1 !important; white-space: nowrap !important; overflow: hidden !important; text-overflow: ellipsis !important; min-width: 0 !important; color: rgba(var(--SmartThemeBodyColor), 0.6) !important; font-size: 12px !important; }
+.my-fold-content .recentChat .chatStats { flex-shrink: 0 !important; margin-left: 10px !important; color: rgba(var(--SmartThemeBodyColor), 0.5) !important; font-size: 11px !important; display: flex !important; gap: 8px !important; }
+
+/* ==================================================
+   首页档案馆重构 (Welcome Page)
+   ================================================== */
+#top-bar { display: none !important; }
+#chat > div.mes[mesid="0"][ch_name="Assistant"] { display: none !important; }
+#chat .welcomePanel { background: transparent !important; border: none !important; box-shadow: none !important; padding: 0 !important; max-width: 850px !important; margin: 0 auto !important; display: flex !important; flex-direction: column !important; align-items: center !important; padding-top: 8vh !important; }
+.welcomeHeader, .welcomeHeaderTitle { display: none !important; }
+.welcomeRecent { width: 100% !important; }
+
+.welcomeRecent::before { content: "档 案 馆"; display: block; text-align: center; font-size: 24px; letter-spacing: 15px; color: #8b3a3a; font-weight: 600; font-family: 'Noto Serif SC', 'SimSun', serif; margin-bottom: 6px; text-shadow: 0 0 10px rgba(139, 58, 58, 0.1); white-space: nowrap; }
+.welcomeRecent::after { content: "C O N F I D E N T I A L   A R C H I V E"; display: block; text-align: center; font-size: clamp(7px, 2vw, 10px); letter-spacing: 3px; color: #888888; font-family: 'Courier New', Courier, monospace; margin-bottom: 15px; text-transform: uppercase; white-space: nowrap; overflow: hidden; }
+
+.archive-timestamp { width: 100%; text-align: right; font-family: 'Courier New', Courier, monospace; font-size: 10px; color: rgba(var(--SmartThemeBodyColor), 0.4); margin-top: -25px; margin-bottom: 20px; pointer-events: none; }
+
+/* 检索台 */
+.archive-toolbar { display: flex; justify-content: space-between; align-items: center; width: 100%; margin-bottom: 20px; padding: 10px 0; border-bottom: 1px dashed var(--SmartThemeBorderColor); }
+.archive-search-box { flex: 1; display: flex; align-items: center; background: rgba(var(--SmartThemeBlurTintColor), 0.5); border: 1px solid var(--SmartThemeBorderColor); border-radius: 4px; margin-right: 10px; overflow: hidden; transition: border-color 0.2s; }
+.archive-search-box:focus-within { border-color: rgba(var(--SmartThemeBodyColor), 0.4); }
+.archive-search-box input { background: transparent; border: none; color: var(--SmartThemeBodyColor); outline: none; width: 100%; font-size: 12px; padding: 7px 12px; font-family: 'Courier New', Courier, monospace; letter-spacing: 1px; }
+.archive-search-box input::placeholder { color: rgba(var(--SmartThemeBodyColor), 0.25); font-style: italic; }
+.archive-search-btn { background: transparent; border: none; border-left: 1px solid var(--SmartThemeBorderColor); color: rgba(var(--SmartThemeBodyColor), 0.6); padding: 0 14px; cursor: pointer; font-size: 12px; transition: all 0.2s; height: 100%; display: flex; align-items: center; justify-content: center; }
+.archive-search-btn:hover { background: rgba(var(--SmartThemeBodyColor), 0.1); color: var(--SmartThemeBodyColor); }
+.archive-sort-box select { background: rgba(var(--SmartThemeBlurTintColor), 0.5); border: 1px solid var(--SmartThemeBorderColor); color: rgba(var(--SmartThemeBodyColor), 0.6); padding: 6px 10px; border-radius: 4px; outline: none; font-size: 11px; cursor: pointer; appearance: none; -webkit-appearance: none; text-align: center; font-family: 'Courier New', Courier, monospace; transition: color 0.2s; }
+.archive-sort-box select:hover { color: var(--SmartThemeBodyColor); }
+.archive-sort-box select option { background: var(--SmartThemeBlurTintColor); color: var(--SmartThemeBodyColor); }
+
+/* 分页器 */
+.archive-pagination { display: flex; justify-content: center; align-items: center; gap: 15px; margin-top: 25px; margin-bottom: 15px; font-family: 'Courier New', Courier, monospace; }
+.page-btn { background: rgba(var(--SmartThemeBlurTintColor), 0.5); border: 1px solid var(--SmartThemeBorderColor); color: rgba(var(--SmartThemeBodyColor), 0.6); padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 11px; letter-spacing: 1px; transition: all 0.2s; }
+.page-btn:hover:not(:disabled) { background: rgba(var(--SmartThemeBodyColor), 0.1); color: var(--SmartThemeBodyColor); }
+.page-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+.page-info { font-size: 12px; color: rgba(var(--SmartThemeBodyColor), 0.5); letter-spacing: 2px; }
+
+/* 重置按钮 */
+.archive-reset-btn { 
+    background: transparent;
+    border: none; border-left: 1px solid var(--SmartThemeBorderColor);
+    color: rgba(var(--SmartThemeBodyColor), 0.6); 
+    padding: 0 14px; cursor: pointer; 
+    font-size: 12px; transition: all 0.2s;
+    height: 100%; display: flex; align-items: center; justify-content: center;
+}
+.archive-reset-btn:hover { 
+    background: rgba(var(--SmartThemeBodyColor), 0.1);
+    color: var(--SmartThemeBodyColor);
+}
+
+/* 聊天条目内的图钉 */
+.chat-pin-btn { color: rgba(var(--SmartThemeBodyColor), 0.4); transition: color 0.2s; }
+.chat-pin-btn.pinned { color: #a45050 !important; }
+/* 置顶聊天行的背景加深 */
+.recentChat.is-pinned-row {
+    background: rgba(128, 128, 128, 0.08) !important; 
+}
+/* 适配暗色主题，如果觉得暗色下太黑，可以用这个微光 */
+[data-theme="dark"] .recentChat.is-pinned-row {
+    background: rgba(255, 255, 255, 0.05) !important;
+}
+
+/* 图钉的暗红状态 */
+.chat-pin-btn.pinned { 
+    color: #a45050 !important; 
+}
