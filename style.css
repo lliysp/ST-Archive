@@ -240,3 +240,81 @@ body:has(#chat .welcomePanel) #chat > div.mes[mesid="0"][ch_name="Assistant"] { 
     letter-spacing: 0.5px; 
 }
 
+/* ==================================================
+   🚨 拾遗面板：全主题自适应补丁
+   ================================================== */
+
+/* 1. 面板背景与文字自适应 */
+#quote-panel, .quote-detail-panel {
+    /* 使用酒馆原生的模糊背景色，暗黑模式下会自动变深色 */
+    background: var(--SmartThemeBlurTintColor) !important;
+    color: var(--SmartThemeBodyColor) !important;
+    border-color: color-mix(in srgb, var(--SmartThemeBodyColor) 20%, transparent) !important;
+}
+
+/* 头部和底部 */
+.quote-header {
+    background: color-mix(in srgb, var(--SmartThemeBodyColor) 5%, transparent) !important;
+    border-bottom-color: color-mix(in srgb, var(--SmartThemeBodyColor) 20%, transparent) !important;
+}
+.quote-footer {
+    background: color-mix(in srgb, var(--SmartThemeBodyColor) 2%, transparent) !important;
+    border-top-color: color-mix(in srgb, var(--SmartThemeBodyColor) 20%, transparent) !important;
+}
+
+/* 2. 卡片背景自适应 */
+.quote-card {
+    background: color-mix(in srgb, var(--SmartThemeBodyColor) 5%, transparent) !important;
+    color: var(--SmartThemeBodyColor) !important;
+    border-left-color: #a45050 !important; /* 暗红封条保留 */
+}
+.quote-card:hover {
+    background: color-mix(in srgb, var(--SmartThemeBodyColor) 10%, transparent) !important;
+}
+
+/* 3. 文字颜色自适应 */
+.quote-tab { color: color-mix(in srgb, var(--SmartThemeBodyColor) 60%, transparent) !important; }
+.quote-tab.active { color: #a45050 !important; background: color-mix(in srgb, #a45050 15%, transparent) !important; }
+.quote-poem-cn, .quote-empty-cn { color: color-mix(in srgb, var(--SmartThemeBodyColor) 80%, transparent) !important; }
+.quote-poem-en, .quote-empty-en { color: color-mix(in srgb, var(--SmartThemeBodyColor) 50%, transparent) !important; }
+.quote-group-name { color: var(--SmartThemeBodyColor) !important; }
+.quote-card .q-text { color: var(--SmartThemeBodyColor) !important; }
+.quote-card .q-time { color: color-mix(in srgb, var(--SmartThemeBodyColor) 40%, transparent) !important; }
+
+/* ==================================================
+   🚨 暗黑模式：弹窗内部文字与表格强制提亮
+   ================================================== */
+
+/* 1. 强制让弹窗里的所有文字跟随主题变亮 */
+#quote-detail-overlay .quote-detail-panel,
+#quote-detail-overlay .quote-detail-text,
+#quote-detail-overlay .quote-detail-text p,
+#quote-detail-overlay .quote-detail-text span,
+#quote-detail-overlay .quote-detail-text li {
+    color: var(--SmartThemeBodyColor) !important;
+}
+
+/* 2. 搞定表格的边框和文字 */
+#quote-detail-overlay table, 
+#quote-detail-overlay th, 
+#quote-detail-overlay td {
+    border-color: color-mix(in srgb, var(--SmartThemeBodyColor) 30%, transparent) !important;
+    color: var(--SmartThemeBodyColor) !important;
+}
+/* 给表头加点底色区分 */
+#quote-detail-overlay th {
+    background: color-mix(in srgb, var(--SmartThemeBodyColor) 10%, transparent) !important;
+}
+
+/* 3. 搞定代码块 */
+#quote-detail-overlay pre, 
+#quote-detail-overlay code {
+    background: color-mix(in srgb, var(--SmartThemeBodyColor) 15%, transparent) !important;
+    color: #e5d5d5 !important; /* 代码用偏暖的亮色 */
+    border: 1px solid color-mix(in srgb, var(--SmartThemeBodyColor) 20%, transparent) !important;
+}
+
+/* 4. 给弹窗本体的背景提一点点亮度，避免纯黑死黑 */
+#quote-detail-overlay .quote-detail-panel {
+    background: color-mix(in srgb, var(--SmartThemeBlurTintColor) 95%, #ffffff 5%) !important;
+}
