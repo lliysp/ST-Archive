@@ -1,29 +1,277 @@
 // @ts-nocheck
+// ==================================================
+// 共享存储层
+// 数据原来只存在浏览器 localStorage 里，换设备就看不到。
+// 现在改为写入 SillyTavern 服务器端 settings（extension_settings），
+// 同一台服务器上登录的任何设备（电脑 / 手机）刷新后都能读到同一份数据。
+// localStorage 只保留一份本地缓存，用于服务器暂时不可用时的兜底与旧数据迁移。
+// ==================================================
+
+const ARCHIVE_STATE_KEY = 'st_archive';
+const ARCHIVE_CACHE_KEY = 'st_archive_cache';
+const ARCHIVE_MIGRATION_KEY = 'st_archive_migrated_to_server';
+const ARCHIVE_STATE_VERSION = 2;
+const ARCHIVE_CACHE_LIMIT = 2 * 1024 * 1024;
+
+// 旧版本使用的 localStorage 键名，仅用于一次性迁移
+const ARCHIVE_LEGACY_KEYS = {
+    quotes: 'st_quotes',
+    pinnedChars: 'archive_pinned',
+    pinnedChats: 'archive_pinned_chats',
+    fabPos: 'quote_fab_pos',
+};
+
+function getArchiveContext() {
+    try {
+        return globalThis.SillyTavern?.getContext?.() || null;
+    } catch (error) {
+        console.warn('[ST-档案馆] 获取 SillyTavern 上下文失败', error);
+        return null;
+    }
+}
+
+function createArchiveState() {
+    return {
+        version: ARCHIVE_STATE_VERSION,
+        revision: 0,
+        updatedAt: 0,
+        quotes: [],
+        pinnedChars: [],
+        pinnedChats: {},
+    };
+}
+
+function sanitizePinnedChats(value) {
+    const result = {};
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return result;
+    Object.keys(value).forEach(key => {
+        if (value[key] === true) result[key] = true;
+    });
+    return result;
+}
+
+function sanitizeArchiveState(raw) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+
+    const state = createArchiveState();
+    state.version = Number(raw.version) || ARCHIVE_STATE_VERSION;
+    state.revision = Number(raw.revision) || 0;
+    state.updatedAt = Number(raw.updatedAt) || 0;
+    state.quotes = Array.isArray(raw.quotes) ? raw.quotes : [];
+    state.pinnedChars = Array.isArray(raw.pinnedChars)
+        ? raw.pinnedChars.filter(item => typeof item === 'string' && item)
+        : [];
+    state.pinnedChats = sanitizePinnedChats(raw.pinnedChats);
+    return state;
+}
+
+function readLocalStorageJson(key, fallback) {
+    try {
+        const raw = localStorage.getItem(key);
+        if (!raw) return fallback;
+        const parsed = JSON.parse(raw);
+        return parsed ?? fallback;
+    } catch (error) {
+        console.warn(`[ST-档案馆] 读取本地存储 ${key} 失败`, error);
+        return fallback;
+    }
+}
+
+function writeLocalStorageJson(key, value) {
+    try {
+        localStorage.setItem(key, JSON.stringify(value));
+        return true;
+    } catch (error) {
+        console.warn(`[ST-档案馆] 写入本地存储 ${key} 失败`, error);
+        return false;
+    }
+}
+
+function archiveQuoteKey(quote) {
+    if (!quote || typeof quote !== 'object') return '';
+    const mesid = String(quote.mesid ?? '').trim();
+    const char = String(quote.char ?? '').trim();
+    const chatKey = String(quote.chatKey ?? '').trim();
+    if (chatKey) return `chat::${chatKey}::${mesid}::${char}`;
+    return `legacy::${char}::${mesid}::${String(quote.text ?? '').slice(0, 160)}`;
+}
+
+function readLegacyLocalState() {
+    const state = createArchiveState();
+
+    const quotes = readLocalStorageJson(ARCHIVE_LEGACY_KEYS.quotes, null);
+    if (Array.isArray(quotes)) state.quotes = quotes;
+
+    const pinnedChars = readLocalStorageJson(ARCHIVE_LEGACY_KEYS.pinnedChars, null);
+    if (Array.isArray(pinnedChars)) {
+        state.pinnedChars = pinnedChars.filter(item => typeof item === 'string' && item);
+    }
+
+    state.pinnedChats = sanitizePinnedChats(readLocalStorageJson(ARCHIVE_LEGACY_KEYS.pinnedChats, null));
+    return state;
+}
+
+function hasArchiveData(state) {
+    return Boolean(state) && (
+        state.quotes.length > 0
+        || state.pinnedChars.length > 0
+        || Object.keys(state.pinnedChats).length > 0
+    );
+}
+
+let archiveState = null;
+
+function attachArchiveStateToSettings() {
+    const ctx = getArchiveContext();
+    if (!ctx?.extensionSettings) return false;
+    ctx.extensionSettings[ARCHIVE_STATE_KEY] = archiveState;
+    return true;
+}
+
+/**
+ * 保存共享数据：写入服务器端 settings，同时镜像一份到 localStorage 兜底。
+ * @param {{ bump?: boolean, save?: boolean }} options
+ * @returns {boolean} 本地缓存是否写入成功
+ */
+function persistArchiveState(options = {}) {
+    const { bump = true, save = true } = options;
+    const state = getArchiveState();
+
+    if (bump) {
+        // revision 只在本机发生真实修改时自增，用来判断“本地缓存是否比服务器数据更新”，
+        // 不依赖各设备可能不一致的系统时钟。
+        state.revision = (Number(state.revision) || 0) + 1;
+        state.updatedAt = Date.now();
+    }
+    state.version = ARCHIVE_STATE_VERSION;
+
+    const ctx = getArchiveContext();
+    if (ctx?.extensionSettings) {
+        ctx.extensionSettings[ARCHIVE_STATE_KEY] = state;
+        if (save && typeof ctx.saveSettingsDebounced === 'function') {
+            try {
+                ctx.saveSettingsDebounced();
+            } catch (error) {
+                console.warn('[ST-档案馆] 请求保存服务器设置失败', error);
+            }
+        }
+    }
+
+    let cached = false;
+    try {
+        const serialized = JSON.stringify(state);
+        if (serialized.length <= ARCHIVE_CACHE_LIMIT) {
+            localStorage.setItem(ARCHIVE_CACHE_KEY, serialized);
+            cached = true;
+        } else {
+            localStorage.removeItem(ARCHIVE_CACHE_KEY);
+        }
+    } catch (error) {
+        console.warn('[ST-档案馆] 写入本地缓存失败', error);
+    }
+    return cached;
+}
+
+function clearLegacyLocalState() {
+    try {
+        localStorage.removeItem(ARCHIVE_LEGACY_KEYS.quotes);
+        localStorage.removeItem(ARCHIVE_LEGACY_KEYS.pinnedChars);
+        localStorage.removeItem(ARCHIVE_LEGACY_KEYS.pinnedChats);
+    } catch (error) {
+        console.warn('[ST-档案馆] 清理旧版本地数据失败', error);
+    }
+}
+
+/**
+ * 升级后的第一次加载：把本机旧版 localStorage 数据并入服务器数据。
+ * 手机和电脑各自可能还有未同步的收藏，只合并一次，避免误删。
+ */
+function mergeLegacyLocalStateOnce(state) {
+    let alreadyMerged = false;
+    try {
+        alreadyMerged = localStorage.getItem(ARCHIVE_MIGRATION_KEY) === '1';
+    } catch (error) {
+        alreadyMerged = false;
+    }
+    if (alreadyMerged) return;
+
+    const local = readLegacyLocalState();
+    let changed = false;
+
+    if (hasArchiveData(local)) {
+        const known = new Set(state.quotes.map(archiveQuoteKey));
+        local.quotes.forEach(quote => {
+            if (!quote || typeof quote !== 'object') return;
+            const mesid = String(quote.mesid ?? '').trim();
+            if (!/^\d+$/.test(mesid)) return;
+            const key = archiveQuoteKey(quote);
+            if (!key || known.has(key)) return;
+            known.add(key);
+            state.quotes.push(quote);
+            changed = true;
+        });
+
+        local.pinnedChars.forEach(key => {
+            if (!state.pinnedChars.includes(key)) {
+                state.pinnedChars.push(key);
+                changed = true;
+            }
+        });
+
+        Object.keys(local.pinnedChats).forEach(key => {
+            if (state.pinnedChats[key] !== true) {
+                state.pinnedChats[key] = true;
+                changed = true;
+            }
+        });
+    }
+
+    try {
+        localStorage.setItem(ARCHIVE_MIGRATION_KEY, '1');
+    } catch (error) {
+        console.warn('[ST-档案馆] 记录迁移状态失败', error);
+    }
+
+    if (!changed) return;
+
+    attachArchiveStateToSettings();
+    const cached = persistArchiveState({ bump: true, save: true });
+    if (cached) clearLegacyLocalState();
+}
+
+function getArchiveState() {
+    if (archiveState) return archiveState;
+
+    const ctx = getArchiveContext();
+    const fromSettings = sanitizeArchiveState(ctx?.extensionSettings?.[ARCHIVE_STATE_KEY]);
+    const fromCache = sanitizeArchiveState(readLocalStorageJson(ARCHIVE_CACHE_KEY, null));
+
+    if (fromSettings) {
+        // 本地缓存的 revision 更大：说明上次修改还没来得及写入服务器（例如保存前就关了页面），
+        // 这时以本地缓存为准，并重新请求保存，避免丢收藏。
+        if (fromCache && fromCache.revision > fromSettings.revision) {
+            archiveState = fromCache;
+            attachArchiveStateToSettings();
+            persistArchiveState({ bump: false, save: true });
+            return archiveState;
+        }
+
+        archiveState = fromSettings;
+        mergeLegacyLocalStateOnce(archiveState);
+        return archiveState;
+    }
+
+    archiveState = fromCache || readLegacyLocalState();
+
+    // 迁移到服务器端，之后其它设备就能读到
+    attachArchiveStateToSettings();
+    const cached = persistArchiveState({ bump: true, save: true });
+    if (cached) clearLegacyLocalState();
+    return archiveState;
+}
+
 (function () {
     console.log("✨ [ST-档案馆] 终极组内置顶版已启动！");
-
-    const PINNED_CHARS_KEY = 'archive_pinned';
-    const PINNED_CHATS_KEY = 'archive_pinned_chats';
-
-    function readJson(key, fallback) {
-        try {
-            const raw = localStorage.getItem(key);
-            if (!raw) return fallback;
-            const parsed = JSON.parse(raw);
-            return parsed ?? fallback;
-        } catch (error) {
-            console.warn(`[ST-档案馆] 读取 ${key} 失败`, error);
-            return fallback;
-        }
-    }
-
-    function writeJson(key, value) {
-        try {
-            localStorage.setItem(key, JSON.stringify(value));
-        } catch (error) {
-            console.warn(`[ST-档案馆] 写入 ${key} 失败`, error);
-        }
-    }
 
     function escapeHtml(value) {
         return String(value ?? '').replace(/[&<>"']/g, char => ({
@@ -81,7 +329,7 @@
         }
 
         const domTags = collectCharacterTags();
-        const pinnedChats = readJson(PINNED_CHATS_KEY, {});
+        const pinnedChats = getArchiveState().pinnedChats;
         const grouped = new Map();
 
         // 1. 提取数据（原生列表本身已按时间排序，直接保留顺序）
@@ -168,7 +416,7 @@
         wrapper.appendChild(pagination);
 
         // 3. 渲染角色组
-        const pinnedChars = readJson(PINNED_CHARS_KEY, []);
+        const pinnedChars = getArchiveState().pinnedChars;
 
         grouped.forEach(data => {
             // 置顶记录排在组内最前，其余保持原生时间顺序
@@ -212,20 +460,21 @@
             pinBtn.addEventListener('click', (e) => {
                 e.stopPropagation();
 
-                let pins = readJson(PINNED_CHARS_KEY, []);
-                const currentlyPinned = pins.includes(data.key) || pins.includes(data.name);
+                const state = getArchiveState();
+                const currentlyPinned = state.pinnedChars.includes(data.key)
+                    || state.pinnedChars.includes(data.name);
 
                 if (currentlyPinned) {
-                    pins = pins.filter(p => p !== data.key && p !== data.name);
+                    state.pinnedChars = state.pinnedChars.filter(p => p !== data.key && p !== data.name);
                     pinBtn.classList.remove('pinned');
                     groupDiv.removeAttribute('data-pinned');
                 } else {
-                    pins.push(data.key);
+                    state.pinnedChars = [...state.pinnedChars, data.key];
                     pinBtn.classList.add('pinned');
                     groupDiv.setAttribute('data-pinned', 'true');
                 }
 
-                writeJson(PINNED_CHARS_KEY, pins);
+                persistArchiveState();
                 applySortAndFilter(true);
             });
 
@@ -276,7 +525,8 @@
                 btns[0].addEventListener('click', (e) => {
                     e.stopPropagation();
 
-                    let pins = readJson(PINNED_CHATS_KEY, {});
+                    const state = getArchiveState();
+                    const pins = state.pinnedChats;
                     const currentlyPinned = pins[chat.pinKey] === true || pins[chat.fileKey] === true;
                     const newState = !currentlyPinned;
 
@@ -286,7 +536,7 @@
                         delete pins[chat.pinKey];
                         delete pins[chat.fileKey];
                     }
-                    writeJson(PINNED_CHATS_KEY, pins);
+                    persistArchiveState();
 
                     chat.isPinned = newState;
                     chatItem.classList.toggle('is-pinned-row', newState);
@@ -407,29 +657,6 @@
 
     if (document.getElementById('quote-fab')) return;
 
-    const QUOTES_KEY = 'st_quotes';
-    const FAB_POS_KEY = 'quote_fab_pos';
-
-    function readJson(key, fallback) {
-        try {
-            const raw = localStorage.getItem(key);
-            if (!raw) return fallback;
-            const parsed = JSON.parse(raw);
-            return parsed ?? fallback;
-        } catch (error) {
-            console.warn(`[ST-档案馆] 读取 ${key} 失败`, error);
-            return fallback;
-        }
-    }
-
-    function writeJson(key, value) {
-        try {
-            localStorage.setItem(key, JSON.stringify(value));
-        } catch (error) {
-            console.warn(`[ST-档案馆] 写入 ${key} 失败`, error);
-        }
-    }
-
     // 旧版本把 .ch_name 的整段文本存了下来，会带消息时间戳，这里做一次兼容清理
     function normalizeCharName(value) {
         let name = String(value || '').trim();
@@ -450,8 +677,8 @@
     }
 
     function loadQuotes() {
-        const raw = readJson(QUOTES_KEY, []);
-        if (!Array.isArray(raw)) return [];
+        const state = getArchiveState();
+        const raw = Array.isArray(state.quotes) ? state.quotes : [];
 
         let changed = false;
         const quotes = [];
@@ -476,8 +703,18 @@
             quotes.push({ ...quote, mesid, char });
         });
 
-        if (changed) writeJson(QUOTES_KEY, quotes);
+        if (changed) {
+            state.quotes = quotes;
+            persistArchiveState({ bump: false });
+        }
         return quotes;
+    }
+
+    // 把当前收藏写回共享状态（服务器端 + 本地缓存）
+    function saveQuotes() {
+        const state = getArchiveState();
+        state.quotes = savedQuotes;
+        persistArchiveState();
     }
 
     function getChatContext() {
@@ -599,7 +836,7 @@
             changed = true;
         });
 
-        if (changed) writeJson(QUOTES_KEY, savedQuotes);
+        if (changed) saveQuotes();
     }
 
     function getQuoteChatInfo(quote) {
@@ -686,8 +923,25 @@
         #quote-panel .quote-tab:hover { color: #a45050; background: rgba(164, 80, 80, 0.06); }
         #quote-panel .quote-tab.active { color: #a45050; background: rgba(164, 80, 80, 0.1); font-weight: 600; }
         .quote-tab-sep { color: rgba(164, 80, 80, 0.28); font-size: 11px; user-select: none; }
-        .quote-close { cursor: pointer; font-size: 24px; color: #a45050; line-height: 1; flex-shrink: 0; padding: 0 2px; }
-        .quote-close:hover { color: #8b3a3a; }
+        .quote-header-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+        #quote-panel .quote-header-btn {
+            appearance: none; -webkit-appearance: none;
+            width: 28px; height: 28px; padding: 0; border: 0; border-radius: 6px;
+            background: transparent; color: rgba(164, 80, 80, 0.72);
+            display: inline-flex; align-items: center; justify-content: center;
+            font-size: 13px; line-height: 1; cursor: pointer;
+            box-shadow: none; transition: color 0.2s, background 0.2s;
+        }
+        #quote-panel .quote-header-btn:hover { color: #a45050; background: rgba(164, 80, 80, 0.1); }
+        #quote-panel .quote-header-btn:active { background: rgba(164, 80, 80, 0.16); }
+        #quote-panel .quote-close {
+            appearance: none; -webkit-appearance: none;
+            width: 28px; height: 28px; padding: 0; border: 0; border-radius: 6px;
+            background: transparent; color: #a45050; font-family: Arial, sans-serif;
+            font-size: 22px; line-height: 1; cursor: pointer; flex-shrink: 0;
+            box-shadow: none; transition: color 0.2s, background 0.2s;
+        }
+        #quote-panel .quote-close:hover { color: #8b3a3a; background: rgba(164, 80, 80, 0.08); }
 
         .quote-content { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 12px; }
 
@@ -766,40 +1020,77 @@
         .mes-bookmark-btn.saved { color: #a45050; }
 
         #quote-detail-overlay {
-            position: fixed; inset: 0; z-index: 1000000;
-            display: none; justify-content: center; align-items: center;
-            padding: 24px; background: rgba(42, 34, 30, 0.34);
+            position: fixed; top: 0; left: 0; right: 0; bottom: 0; inset: 0;
+            z-index: 2147483000;
+            display: none; justify-content: center; align-items: flex-start;
+            box-sizing: border-box;
+            width: 100%; height: 100%;
+            max-width: none; max-height: none;
+            margin: 0; padding: 16px; border: 0;
+            background: rgba(42, 34, 30, 0.34);
+            overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
         }
+        #quote-detail-overlay[open],
         #quote-detail-overlay.show { display: flex; animation: quoteFadeIn 0.18s ease-out; }
+        #quote-detail-overlay::backdrop { background: transparent; }
+        /* 老浏览器没有顶层弹窗（showModal）时，关闭拾遗面板的毛玻璃，避免合成层级把详情压到下面 */
+        #quote-overlay.quote-blur-off {
+            backdrop-filter: none !important;
+            -webkit-backdrop-filter: none !important;
+        }
         .quote-detail-panel {
-            position: relative; width: min(90vw, 560px); max-height: 72vh; overflow-y: auto;
-            padding: 24px 26px 22px; border: 1px solid rgba(164, 80, 80, 0.4); border-radius: 12px;
+            position: relative;
+            display: flex; flex-direction: column;
+            box-sizing: border-box;
+            width: 92vw;
+            width: min(92vw, 560px);
+            max-width: 560px;
+            max-height: 72vh;
+            max-height: min(72vh, 72dvh);
+            margin: auto 0;
+            overflow: hidden;
+            border: 1px solid rgba(164, 80, 80, 0.4); border-radius: 12px;
             background: linear-gradient(145deg, #FEFCF8 0%, #F8F2E9 100%);
             color: #4A4A4A; box-shadow: 0 18px 50px rgba(60, 40, 32, 0.22);
             font-family: 'Noto Serif SC', 'Songti SC', serif;
             transform: translateY(6px) scale(0.98); animation: quoteDetailIn 0.22s ease-out forwards;
         }
+        #quote-detail-overlay .quote-detail-head {
+            display: flex; align-items: flex-start; gap: 12px;
+            padding: 22px 24px 0; flex-shrink: 0;
+        }
         #quote-detail-overlay .quote-detail-close {
-            position: absolute; top: 10px; right: 14px; padding: 0; border: 0;
-            background: none; color: #a45050; font-size: 24px; line-height: 1; cursor: pointer;
+            margin-left: auto; flex-shrink: 0;
+            width: 28px; height: 28px; padding: 0; border: 0; border-radius: 6px;
+            background: none; color: #a45050; font-family: Arial, sans-serif;
+            font-size: 24px; line-height: 1; cursor: pointer; box-shadow: none;
         }
         #quote-detail-overlay .quote-detail-close:hover { color: #8b3a3a; }
         .quote-detail-title {
-            padding-right: 30px; font-family: 'Noto Serif SC', 'Songti SC', serif;
+            flex: 1; min-width: 0;
+            font-family: 'Noto Serif SC', 'Songti SC', serif;
             font-size: 15px; color: #8b3a3a; letter-spacing: 1.5px; line-height: 1.6;
+            overflow-wrap: anywhere; word-break: break-word;
         }
         .quote-detail-title::before {
             content: "❖"; margin-right: 8px; color: #a45050; font-size: 11px;
             vertical-align: 1px;
         }
         .quote-detail-meta {
-            margin: 12px 0 16px; padding-bottom: 12px; border-bottom: 1px dashed rgba(164, 80, 80, 0.28);
+            flex-shrink: 0;
+            margin: 12px 24px 16px; padding-bottom: 12px; border-bottom: 1px dashed rgba(164, 80, 80, 0.28);
             color: #999; font-family: 'Courier New', Courier, monospace; font-size: 11px; letter-spacing: 0.3px;
+            overflow-wrap: anywhere; word-break: break-word;
         }
         .quote-detail-text {
-            border-left: 3px solid rgba(164, 80, 80, 0.5); padding-left: 14px;
+            flex: 1 1 auto;
+            min-height: 0;
+            overflow-y: auto; overflow-x: hidden;
+            overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
+            margin: 0 24px 22px; padding-left: 14px;
+            border-left: 3px solid rgba(164, 80, 80, 0.5);
             color: #333; font-size: 14px; line-height: 1.9;
-            white-space: pre-wrap; overflow-wrap: anywhere;
+            white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
         }
         @keyframes quoteFadeIn { from { opacity: 0; } to { opacity: 1; } }
         @keyframes quoteDetailIn { to { transform: translateY(0) scale(1); } }
@@ -833,7 +1124,15 @@
                 <span class="quote-tab-sep">//</span>
                 <button type="button" class="quote-tab" data-tab="all" role="tab" aria-selected="false">全部聊天</button>
             </div>
-            <div class="quote-close" title="关闭">&times;</div>
+            <div class="quote-header-actions">
+                <button type="button" class="quote-header-btn quote-export-btn" title="导出收藏（下载 JSON 备份）" aria-label="导出收藏">
+                    <i class="fa-solid fa-file-export"></i>
+                </button>
+                <button type="button" class="quote-header-btn quote-import-btn" title="导入收藏（从 JSON 备份恢复）" aria-label="导入收藏">
+                    <i class="fa-solid fa-file-import"></i>
+                </button>
+                <button type="button" class="quote-close" title="关闭" aria-label="关闭">&times;</button>
+            </div>
         </div>
         <div class="quote-content" id="quote-list"></div>
         <!-- 🚨 极简底部英文 -->
@@ -844,19 +1143,35 @@
     overlay.appendChild(panel);
     document.body.appendChild(overlay);
 
-    const detailOverlay = document.createElement('div');
+    const importFileInput = document.createElement('input');
+    importFileInput.type = 'file';
+    importFileInput.accept = '.json,application/json';
+    importFileInput.style.display = 'none';
+    importFileInput.addEventListener('change', () => {
+        const file = importFileInput.files && importFileInput.files[0];
+        importFileInput.value = '';
+        if (file) importQuotesFromFile(file);
+    });
+    document.body.appendChild(importFileInput);
+
+    // 用原生 <dialog>：showModal() 会把详情弹层放进浏览器顶层（top layer），
+    // 不会被拾遗面板、毛玻璃（backdrop-filter）或任何 z-index 堆叠上下文盖住。
+    // 旧浏览器不支持 showModal 时自动回退成普通 fixed 弹层。
+    const detailOverlay = document.createElement('dialog');
     detailOverlay.id = 'quote-detail-overlay';
+    detailOverlay.setAttribute('aria-label', '拾遗详情');
     detailOverlay.innerHTML = `
-        <div class="quote-detail-panel" role="dialog" aria-modal="true" aria-label="拾遗详情">
-            <button type="button" class="quote-detail-close" title="关闭">&times;</button>
-            <div class="quote-detail-title"></div>
+        <div class="quote-detail-panel" aria-modal="true">
+            <div class="quote-detail-head">
+                <div class="quote-detail-title"></div>
+                <button type="button" class="quote-detail-close" title="关闭" aria-label="关闭">&times;</button>
+            </div>
             <div class="quote-detail-meta"></div>
             <div class="quote-detail-text"></div>
         </div>
     `;
     document.body.appendChild(detailOverlay);
 
-    const detailPanel = detailOverlay.querySelector('.quote-detail-panel');
     const detailTitle = detailOverlay.querySelector('.quote-detail-title');
     const detailMeta = detailOverlay.querySelector('.quote-detail-meta');
     const detailText = detailOverlay.querySelector('.quote-detail-text');
@@ -948,6 +1263,24 @@
         list.querySelector('.quote-empty-en').textContent = en;
     }
 
+    function isQuoteDetailOpen() {
+        return detailOverlay.open === true || detailOverlay.classList.contains('show');
+    }
+
+    function openQuoteDetailLayer() {
+        if (typeof detailOverlay.showModal === 'function') {
+            if (detailOverlay.open) return;
+            try {
+                detailOverlay.showModal();
+                return;
+            } catch (error) {
+                console.warn('[ST-档案馆] 原生详情弹窗不可用，回退到普通弹层', error);
+            }
+        }
+        overlay.classList.add('quote-blur-off');
+        detailOverlay.classList.add('show');
+    }
+
     function showQuoteDetail(quote) {
         const chat = getQuoteChatInfo(quote);
         detailTitle.textContent = `${chat.char} - ${chat.chatName}`;
@@ -957,12 +1290,20 @@
             quote.time,
         ].filter(Boolean).join(' · ');
         detailText.textContent = quote.text || '（这条拾遗没有正文）';
-        detailPanel.scrollTop = 0;
-        detailOverlay.classList.add('show');
+        detailText.scrollTop = 0;
+        openQuoteDetailLayer();
     }
 
     function hideQuoteDetail() {
         detailOverlay.classList.remove('show');
+        overlay.classList.remove('quote-blur-off');
+        if (typeof detailOverlay.close === 'function' && detailOverlay.open) {
+            try {
+                detailOverlay.close();
+            } catch (error) {
+                console.warn('[ST-档案馆] 关闭详情弹窗失败', error);
+            }
+        }
     }
 
     function closeQuotePanel() {
@@ -1002,9 +1343,213 @@
     function deleteQuote(quote, chatInfo) {
         const ctx = getChatContext();
         savedQuotes = savedQuotes.filter(item => item !== quote);
-        writeJson(QUOTES_KEY, savedQuotes);
+        saveQuotes();
         syncBookmarkAfterDelete(quote, chatInfo, ctx);
         renderQuotes();
+    }
+
+    // ==================================================
+    // 导出 / 导入（本地 JSON 备份）
+    // ==================================================
+
+    function showArchiveToast(type, message) {
+        const toastType = ['success', 'info', 'warning', 'error'].includes(type) ? type : 'info';
+        try {
+            if (globalThis.toastr && typeof globalThis.toastr[toastType] === 'function') {
+                globalThis.toastr[toastType](message, 'ST-档案馆', { timeOut: 3200, preventDuplicates: true });
+                return;
+            }
+        } catch (error) {
+            console.warn('[ST-档案馆] 提示弹窗失败', error);
+        }
+        console.log(`[ST-档案馆] ${message}`);
+    }
+
+    function formatArchiveTimestamp(date = new Date()) {
+        const pad = value => String(value).padStart(2, '0');
+        return [
+            date.getFullYear(),
+            pad(date.getMonth() + 1),
+            pad(date.getDate()),
+            '-',
+            pad(date.getHours()),
+            pad(date.getMinutes()),
+            pad(date.getSeconds()),
+        ].join('');
+    }
+
+    function buildArchiveExportPayload() {
+        const state = getArchiveState();
+        return {
+            app: 'ST-Archive',
+            type: 'st-archive-quotes',
+            version: 1,
+            exportedAt: new Date().toISOString(),
+            count: savedQuotes.length,
+            quotes: savedQuotes,
+            pinnedChars: [...state.pinnedChars],
+            pinnedChats: { ...state.pinnedChats },
+        };
+    }
+
+    function exportQuotesToFile() {
+        const payload = buildArchiveExportPayload();
+        const fileName = `st-archive-${formatArchiveTimestamp()}.json`;
+
+        try {
+            const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = fileName;
+            link.style.display = 'none';
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            setTimeout(() => URL.revokeObjectURL(url), 2000);
+
+            if (payload.count > 0) {
+                showArchiveToast('success', `已导出 ${payload.count} 条收藏`);
+            } else {
+                showArchiveToast('info', '当前还没有收藏，已导出空备份');
+            }
+        } catch (error) {
+            console.error('[ST-档案馆] 导出失败', error);
+            showArchiveToast('error', '导出失败：当前浏览器不支持文件下载');
+        }
+    }
+
+    function normalizeImportedQuote(raw) {
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+
+        const mesid = String(raw.mesid ?? '').trim();
+        if (!/^\d+$/.test(mesid)) return null;
+
+        let char = normalizeCharName(raw.char ?? '');
+        if (char.includes('${')) char = '未知角色';
+
+        const text = String(raw.text ?? '');
+        if (!text.trim()) return null;
+
+        return {
+            mesid,
+            char,
+            text,
+            time: String(raw.time ?? '').trim() || new Date().toLocaleString(),
+            chatKey: String(raw.chatKey ?? '').trim(),
+            chatName: String(raw.chatName ?? '').trim(),
+            chatChar: raw.chatChar ? normalizeCharName(raw.chatChar) : char,
+            scope: String(raw.scope ?? '').trim(),
+        };
+    }
+
+    function mergeImportedQuotes(rawList) {
+        const merged = [...savedQuotes];
+        const known = new Set(merged.map(archiveQuoteKey));
+        let added = 0;
+        let skipped = 0;
+
+        rawList.forEach(raw => {
+            const quote = normalizeImportedQuote(raw);
+            if (!quote) {
+                skipped++;
+                return;
+            }
+
+            const key = archiveQuoteKey(quote);
+            if (!key || known.has(key)) {
+                skipped++;
+                return;
+            }
+
+            known.add(key);
+            merged.push(quote);
+            added++;
+        });
+
+        return { merged, added, skipped };
+    }
+
+    function mergeImportedPins(payload) {
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return 0;
+
+        const state = getArchiveState();
+        let added = 0;
+
+        if (Array.isArray(payload.pinnedChars)) {
+            payload.pinnedChars.forEach(key => {
+                if (typeof key !== 'string' || !key) return;
+                if (state.pinnedChars.includes(key)) return;
+                state.pinnedChars.push(key);
+                added++;
+            });
+        }
+
+        if (payload.pinnedChats && typeof payload.pinnedChats === 'object' && !Array.isArray(payload.pinnedChats)) {
+            Object.keys(payload.pinnedChats).forEach(key => {
+                if (payload.pinnedChats[key] !== true) return;
+                if (state.pinnedChats[key] === true) return;
+                state.pinnedChats[key] = true;
+                added++;
+            });
+        }
+
+        return added;
+    }
+
+    function importQuotesFromFile(file) {
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = () => {
+            let payload;
+            try {
+                payload = JSON.parse(String(reader.result ?? ''));
+            } catch (error) {
+                showArchiveToast('error', '导入失败：文件不是合法的 JSON');
+                return;
+            }
+
+            const rawList = Array.isArray(payload)
+                ? payload
+                : (Array.isArray(payload?.quotes) ? payload.quotes
+                    : (Array.isArray(payload?.data) ? payload.data : null));
+
+            if (!rawList) {
+                showArchiveToast('error', '导入失败：文件里没有找到收藏列表');
+                return;
+            }
+
+            try {
+                const { merged, added, skipped } = mergeImportedQuotes(rawList);
+                const pinAdded = mergeImportedPins(Array.isArray(payload) ? null : payload);
+
+                if (added > 0) {
+                    savedQuotes = merged;
+                    saveQuotes();
+                } else if (pinAdded > 0) {
+                    persistArchiveState();
+                }
+
+                if (added > 0 || pinAdded > 0) {
+                    renderQuotes();
+                    injectBookmarks();
+                }
+
+                const parts = [`新增 ${added} 条`];
+                if (skipped > 0) parts.push(`跳过 ${skipped} 条重复或无效记录`);
+                if (pinAdded > 0) parts.push(`恢复 ${pinAdded} 项置顶`);
+
+                const toastType = (added > 0 || pinAdded > 0) ? 'success' : 'info';
+                showArchiveToast(toastType, `导入完成：${parts.join('，')}`);
+            } catch (error) {
+                console.error('[ST-档案馆] 导入失败', error);
+                showArchiveToast('error', '导入失败：数据格式异常');
+            }
+        };
+
+        reader.onerror = () => showArchiveToast('error', '导入失败：无法读取文件');
+        reader.readAsText(file);
     }
 
     function createQuoteCard(quote, mode, chatInfo) {
@@ -1230,7 +1775,7 @@
             btn.innerHTML = '<i class="fa-solid fa-bookmark"></i>';
         }
 
-        writeJson(QUOTES_KEY, savedQuotes);
+        saveQuotes();
         renderQuotes();
     });
 
@@ -1246,6 +1791,8 @@
     });
 
     panel.querySelector('.quote-close').addEventListener('click', closeQuotePanel);
+    panel.querySelector('.quote-export-btn').addEventListener('click', exportQuotesToFile);
+    panel.querySelector('.quote-import-btn').addEventListener('click', () => importFileInput.click());
     panel.querySelectorAll('.quote-tab').forEach(button => {
         button.addEventListener('click', () => setQuoteTab(button.getAttribute('data-tab')));
     });
@@ -1258,11 +1805,15 @@
     detailOverlay.addEventListener('click', (event) => {
         if (event.target === detailOverlay) hideQuoteDetail();
     });
+    // 原生 <dialog> 被浏览器自己关闭（例如 Esc）时同步清理回退用的 class
+    detailOverlay.addEventListener('close', () => {
+        detailOverlay.classList.remove('show');
+    });
 
     document.addEventListener('keydown', (event) => {
         if (event.key !== 'Escape') return;
 
-        if (detailOverlay.classList.contains('show')) {
+        if (isQuoteDetailOpen()) {
             hideQuoteDetail();
             return;
         }
@@ -1270,11 +1821,11 @@
         if (overlay.classList.contains('show')) closeQuotePanel();
     });
 
-    // 6. 拖拽逻辑（保持不变）
+    // 6. 拖拽逻辑（悬浮按钮位置保持设备本地记忆，不参与云端同步）
     (function makeDraggable(el) {
         let isDragging = false, hasMoved = false;
         let startX, startY, initialLeft, initialTop;
-        const savedPos = readJson(FAB_POS_KEY, null);
+        const savedPos = readLocalStorageJson(ARCHIVE_LEGACY_KEYS.fabPos, null);
         if (savedPos && typeof savedPos.left === 'number' && typeof savedPos.top === 'number') {
             el.style.left = savedPos.left + 'px'; el.style.top = savedPos.top + 'px';
         } else {
@@ -1311,7 +1862,7 @@
             if (!isDragging) return;
             isDragging = false;
             if (hasMoved) {
-                writeJson(FAB_POS_KEY, { left: el.offsetLeft, top: el.offsetTop });
+                writeLocalStorageJson(ARCHIVE_LEGACY_KEYS.fabPos, { left: el.offsetLeft, top: el.offsetTop });
             }
         };
 
