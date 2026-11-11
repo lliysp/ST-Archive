@@ -1023,8 +1023,10 @@ function getArchiveState() {
             position: fixed; top: 0; left: 0; right: 0; bottom: 0; inset: 0;
             z-index: 2147483000;
             display: none; justify-content: center; align-items: flex-start;
+            /* 手机端优先按“安全居中”：放得下就居中，放不下就贴顶，绝不把标题和关闭按钮顶出屏幕 */
+            align-items: safe center;
             box-sizing: border-box;
-            width: 100%; height: 100%;
+            width: 100%; height: 100%; height: 100dvh;
             max-width: none; max-height: none;
             margin: 0; padding: 16px; border: 0;
             background: rgba(42, 34, 30, 0.34);
@@ -1045,9 +1047,12 @@ function getArchiveState() {
             width: 92vw;
             width: min(92vw, 560px);
             max-width: 560px;
+            /* 依次回退：老浏览器用 vh；支持 dvh 的用动态视口；
+               再用“弹窗自身高度的 100%”兜底，避免手机本地部署时 vh 异常导致高度超出屏幕 */
             max-height: 72vh;
             max-height: min(72vh, 72dvh);
-            margin: auto 0;
+            max-height: min(72vh, 100%);
+            margin: 0 auto;
             overflow: hidden;
             border: 1px solid rgba(164, 80, 80, 0.4); border-radius: 12px;
             background: linear-gradient(145deg, #FEFCF8 0%, #F8F2E9 100%);
@@ -1267,18 +1272,54 @@ function getArchiveState() {
         return detailOverlay.open === true || detailOverlay.classList.contains('show');
     }
 
-    function openQuoteDetailLayer() {
-        if (typeof detailOverlay.showModal === 'function') {
-            if (detailOverlay.open) return;
-            try {
-                detailOverlay.showModal();
-                return;
-            } catch (error) {
-                console.warn('[ST-档案馆] 原生详情弹窗不可用，回退到普通弹层', error);
+    // 手机本地部署 / 内置浏览器里，100vh、100dvh 有时会按更大的“布局视口”计算，
+    // 结果弹窗比屏幕还高、上半部分被顶到屏幕外。这里直接按“当前看得见的视口”钉住弹层。
+    function applyDetailViewportBounds() {
+        const viewport = window.visualViewport;
+        const viewportWidth = Math.round((viewport ? viewport.width : window.innerWidth) || 0);
+        let viewportHeight = Math.round((viewport ? viewport.height : window.innerHeight) || 0);
+        if (viewportWidth <= 0 || viewportHeight <= 0) return;
+
+        // 极端回退：没有 VisualViewport 的旧内核里，innerHeight 可能被报成超大的布局视口，
+        // 这时再用屏幕高度兜底，保证弹窗不会高于手机屏幕。
+        if (!viewport) {
+            const screenHeight = Math.round(Number(window.screen?.height) || 0);
+            if (screenHeight > 0 && viewportHeight > screenHeight * 1.1) {
+                viewportHeight = screenHeight;
             }
         }
-        overlay.classList.add('quote-blur-off');
-        detailOverlay.classList.add('show');
+
+        detailOverlay.style.top = `${Math.round(viewport ? viewport.offsetTop : 0)}px`;
+        detailOverlay.style.left = `${Math.round(viewport ? viewport.offsetLeft : 0)}px`;
+        detailOverlay.style.right = 'auto';
+        detailOverlay.style.bottom = 'auto';
+        detailOverlay.style.width = `${viewportWidth}px`;
+        detailOverlay.style.height = `${viewportHeight}px`;
+    }
+
+    function refreshQuoteDetailBounds() {
+        if (isQuoteDetailOpen()) applyDetailViewportBounds();
+    }
+
+    function openQuoteDetailLayer() {
+        applyDetailViewportBounds();
+
+        if (typeof detailOverlay.showModal === 'function') {
+            if (!detailOverlay.open) {
+                try {
+                    detailOverlay.showModal();
+                } catch (error) {
+                    console.warn('[ST-档案馆] 原生详情弹窗不可用，回退到普通弹层', error);
+                    overlay.classList.add('quote-blur-off');
+                    detailOverlay.classList.add('show');
+                }
+            }
+        } else {
+            overlay.classList.add('quote-blur-off');
+            detailOverlay.classList.add('show');
+        }
+
+        applyDetailViewportBounds();
     }
 
     function showQuoteDetail(quote) {
@@ -1309,6 +1350,14 @@ function getArchiveState() {
     function closeQuotePanel() {
         hideQuoteDetail();
         overlay.classList.remove('show');
+    }
+
+    // 旋转屏幕、地址栏收起/展开、软键盘变化时，重新把详情弹层钉回可见视口
+    window.addEventListener('resize', refreshQuoteDetailBounds);
+    window.addEventListener('orientationchange', refreshQuoteDetailBounds);
+    if (window.visualViewport && typeof window.visualViewport.addEventListener === 'function') {
+        window.visualViewport.addEventListener('resize', refreshQuoteDetailBounds);
+        window.visualViewport.addEventListener('scroll', refreshQuoteDetailBounds);
     }
 
     function syncBookmarkAfterDelete(quote, chatInfo, ctx) {
