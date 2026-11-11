@@ -2,7 +2,7 @@
    ST-Archive (绝密档案馆) - 终极完美版
    ================================================== */
 
-#my-folded-wrapper { padding: 0 12px !important; }
+.my-folded-wrapper { padding: 0 12px !important; }
 
 .my-fold-group {
     /* 1. 去掉背景和四周的框 */
@@ -72,7 +72,8 @@
 }
 
 .my-fold-header-right { display: flex; align-items: center; flex-shrink: 0; }
-.my-pin-btn { cursor: pointer; color: rgba(var(--SmartThemeBodyColor), 0.4); transition: color 0.2s, transform 0.2s; }
+.archive-count { font-size: 11px; color: color-mix(in srgb, var(--SmartThemeBodyColor) 40%, transparent); margin-right: 12px; }
+.my-pin-btn { cursor: pointer; color: color-mix(in srgb, var(--SmartThemeBodyColor) 40%, transparent); transition: color 0.2s, transform 0.2s; }
 .my-pin-btn:hover { transform: scale(1.2); }
 .my-pin-btn.pinned { color: #a45050; }
 
@@ -93,18 +94,19 @@
 .my-fold-content .recentChat .recentChatInfo { flex: 1 !important; display: flex !important; flex-direction: column !important; align-items: flex-start !important; justify-content: center !important; min-width: 0 !important; overflow: hidden !important; }
 .my-fold-content .recentChat .chatNameContainer { display: flex !important; flex-direction: row !important; align-items: center !important; width: 100% !important; min-width: 0 !important; margin-bottom: 4px !important; }
 .my-fold-content .recentChat .chatName { flex: 1 !important; display: flex !important; white-space: nowrap !important; overflow: hidden !important; text-overflow: ellipsis !important; min-width: 0 !important; font-size: 14px !important; color: var(--SmartThemeBodyColor) !important; font-weight: 600 !important; }
-.my-fold-content .recentChat .chatDate { flex-shrink: 0 !important; margin: 0 10px !important; color: rgba(var(--SmartThemeBodyColor), 0.5) !important; font-size: 12px !important; }
+.my-fold-content .recentChat .chatDate { flex-shrink: 0 !important; margin: 0 10px !important; color: color-mix(in srgb, var(--SmartThemeBodyColor) 50%, transparent) !important; font-size: 12px !important; }
 .my-fold-content .recentChat .chatActions { display: flex !important; gap: 4px !important; opacity: 0.3 !important; }
 .my-fold-content .recentChat:hover .chatActions { opacity: 1 !important; }
 .my-fold-content .recentChat .chatMessageContainer { display: flex !important; width: 100% !important; min-width: 0 !important; }
-.my-fold-content .recentChat .chatMessage { flex: 1 !important; white-space: nowrap !important; overflow: hidden !important; text-overflow: ellipsis !important; min-width: 0 !important; color: rgba(var(--SmartThemeBodyColor), 0.6) !important; font-size: 12px !important; }
-.my-fold-content .recentChat .chatStats { flex-shrink: 0 !important; margin-left: 10px !important; color: rgba(var(--SmartThemeBodyColor), 0.5) !important; font-size: 11px !important; display: flex !important; gap: 8px !important; }
+.my-fold-content .recentChat .chatMessage { flex: 1 !important; white-space: nowrap !important; overflow: hidden !important; text-overflow: ellipsis !important; min-width: 0 !important; color: color-mix(in srgb, var(--SmartThemeBodyColor) 60%, transparent) !important; font-size: 12px !important; }
+.my-fold-content .recentChat .chatStats { flex-shrink: 0 !important; margin-left: 10px !important; color: color-mix(in srgb, var(--SmartThemeBodyColor) 50%, transparent) !important; font-size: 11px !important; display: flex !important; gap: 8px !important; }
 
 /* ==================================================
    首页档案馆重构 (Welcome Page)
    ================================================== */
-#top-bar { display: none !important; }
-#chat > div.mes[mesid="0"][ch_name="Assistant"] { display: none !important; }
+body:has(#chat .welcomePanel) #top-bar { display: none !important; }
+body:has(#chat .welcomePanel) #chat > div.mes[type="assistant_message"],
+body:has(#chat .welcomePanel) #chat > div.mes[mesid="0"][ch_name="Assistant"] { display: none !important; }
 #chat .welcomePanel { background: transparent !important; border: none !important; box-shadow: none !important; padding: 0 !important; max-width: 850px !important; margin: 0 auto !important; display: flex !important; flex-direction: column !important; align-items: center !important; padding-top: 8vh !important; }
 .welcomeHeader, .welcomeHeaderTitle { display: none !important; }
 .welcomeRecent { width: 100% !important; }
@@ -112,51 +114,47 @@
 .welcomeRecent::before { content: "档 案 馆"; display: block; text-align: center; font-size: 24px; letter-spacing: 15px; color: #8b3a3a; font-weight: 600; font-family: 'Noto Serif SC', 'SimSun', serif; margin-bottom: 6px; text-shadow: 0 0 10px rgba(139, 58, 58, 0.1); white-space: nowrap; }
 .welcomeRecent::after { content: "C O N F I D E N T I A L   A R C H I V E"; display: block; text-align: center; font-size: clamp(7px, 2vw, 10px); letter-spacing: 3px; color: #888888; font-family: 'Courier New', Courier, monospace; margin-bottom: 15px; text-transform: uppercase; white-space: nowrap; overflow: hidden; }
 
-.archive-timestamp { width: 100%; text-align: right; font-family: 'Courier New', Courier, monospace; font-size: 10px; color: rgba(var(--SmartThemeBodyColor), 0.4); margin-top: -25px; margin-bottom: 20px; pointer-events: none; }
+.archive-timestamp { width: 100%; text-align: right; font-family: 'Courier New', Courier, monospace; font-size: 10px; color: color-mix(in srgb, var(--SmartThemeBodyColor) 40%, transparent); margin-top: -25px; margin-bottom: 20px; pointer-events: none; }
 
 /* 检索台 */
 .archive-toolbar { display: flex; justify-content: space-between; align-items: center; width: 100%; margin-bottom: 20px; padding: 10px 0; border-bottom: 1px dashed var(--SmartThemeBorderColor); }
-.archive-search-box { flex: 1; display: flex; align-items: center; background: rgba(var(--SmartThemeBlurTintColor), 0.5); border: 1px solid var(--SmartThemeBorderColor); border-radius: 4px; margin-right: 10px; overflow: hidden; transition: border-color 0.2s; }
-.archive-search-box:focus-within { border-color: rgba(var(--SmartThemeBodyColor), 0.4); }
+.archive-search-box { flex: 1; display: flex; align-items: center; background: color-mix(in srgb, var(--SmartThemeBlurTintColor) 50%, transparent); border: 1px solid var(--SmartThemeBorderColor); border-radius: 4px; margin-right: 10px; overflow: hidden; transition: border-color 0.2s; }
+.archive-search-box:focus-within { border-color: color-mix(in srgb, var(--SmartThemeBodyColor) 40%, transparent); }
 .archive-search-box input { background: transparent; border: none; color: var(--SmartThemeBodyColor); outline: none; width: 100%; font-size: 12px; padding: 7px 12px; font-family: 'Courier New', Courier, monospace; letter-spacing: 1px; }
-.archive-search-box input::placeholder { color: rgba(var(--SmartThemeBodyColor), 0.25); font-style: italic; }
-.archive-search-btn { background: transparent; border: none; border-left: 1px solid var(--SmartThemeBorderColor); color: rgba(var(--SmartThemeBodyColor), 0.6); padding: 0 14px; cursor: pointer; font-size: 12px; transition: all 0.2s; height: 100%; display: flex; align-items: center; justify-content: center; }
-.archive-search-btn:hover { background: rgba(var(--SmartThemeBodyColor), 0.1); color: var(--SmartThemeBodyColor); }
-.archive-sort-box select { background: rgba(var(--SmartThemeBlurTintColor), 0.5); border: 1px solid var(--SmartThemeBorderColor); color: rgba(var(--SmartThemeBodyColor), 0.6); padding: 6px 10px; border-radius: 4px; outline: none; font-size: 11px; cursor: pointer; appearance: none; -webkit-appearance: none; text-align: center; font-family: 'Courier New', Courier, monospace; transition: color 0.2s; }
+.archive-search-box input::placeholder { color: color-mix(in srgb, var(--SmartThemeBodyColor) 25%, transparent); font-style: italic; }
+.archive-search-btn { background: transparent; border: none; border-left: 1px solid var(--SmartThemeBorderColor); color: color-mix(in srgb, var(--SmartThemeBodyColor) 60%, transparent); padding: 0 14px; cursor: pointer; font-size: 12px; transition: all 0.2s; height: 100%; display: flex; align-items: center; justify-content: center; }
+.archive-search-btn:hover { background: color-mix(in srgb, var(--SmartThemeBodyColor) 10%, transparent); color: var(--SmartThemeBodyColor); }
+.archive-sort-box select { background: color-mix(in srgb, var(--SmartThemeBlurTintColor) 50%, transparent); border: 1px solid var(--SmartThemeBorderColor); color: color-mix(in srgb, var(--SmartThemeBodyColor) 60%, transparent); padding: 6px 10px; border-radius: 4px; outline: none; font-size: 11px; cursor: pointer; appearance: none; -webkit-appearance: none; text-align: center; font-family: 'Courier New', Courier, monospace; transition: color 0.2s; }
 .archive-sort-box select:hover { color: var(--SmartThemeBodyColor); }
 .archive-sort-box select option { background: var(--SmartThemeBlurTintColor); color: var(--SmartThemeBodyColor); }
 
 /* 分页器 */
 .archive-pagination { display: flex; justify-content: center; align-items: center; gap: 15px; margin-top: 25px; margin-bottom: 15px; font-family: 'Courier New', Courier, monospace; }
-.page-btn { background: rgba(var(--SmartThemeBlurTintColor), 0.5); border: 1px solid var(--SmartThemeBorderColor); color: rgba(var(--SmartThemeBodyColor), 0.6); padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 11px; letter-spacing: 1px; transition: all 0.2s; }
-.page-btn:hover:not(:disabled) { background: rgba(var(--SmartThemeBodyColor), 0.1); color: var(--SmartThemeBodyColor); }
+.page-btn { background: color-mix(in srgb, var(--SmartThemeBlurTintColor) 50%, transparent); border: 1px solid var(--SmartThemeBorderColor); color: color-mix(in srgb, var(--SmartThemeBodyColor) 60%, transparent); padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 11px; letter-spacing: 1px; transition: all 0.2s; }
+.page-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--SmartThemeBodyColor) 10%, transparent); color: var(--SmartThemeBodyColor); }
 .page-btn:disabled { opacity: 0.3; cursor: not-allowed; }
-.page-info { font-size: 12px; color: rgba(var(--SmartThemeBodyColor), 0.5); letter-spacing: 2px; }
+.page-info { font-size: 12px; color: color-mix(in srgb, var(--SmartThemeBodyColor) 50%, transparent); letter-spacing: 2px; }
 
 /* 重置按钮 */
 .archive-reset-btn { 
     background: transparent;
     border: none; border-left: 1px solid var(--SmartThemeBorderColor);
-    color: rgba(var(--SmartThemeBodyColor), 0.6); 
+    color: color-mix(in srgb, var(--SmartThemeBodyColor) 60%, transparent); 
     padding: 0 14px; cursor: pointer; 
     font-size: 12px; transition: all 0.2s;
     height: 100%; display: flex; align-items: center; justify-content: center;
 }
 .archive-reset-btn:hover { 
-    background: rgba(var(--SmartThemeBodyColor), 0.1);
+    background: color-mix(in srgb, var(--SmartThemeBodyColor) 10%, transparent);
     color: var(--SmartThemeBodyColor);
 }
 
 /* 聊天条目内的图钉 */
-.chat-pin-btn { color: rgba(var(--SmartThemeBodyColor), 0.4); transition: color 0.2s; }
+.chat-pin-btn { color: color-mix(in srgb, var(--SmartThemeBodyColor) 40%, transparent); transition: color 0.2s; }
 .chat-pin-btn.pinned { color: #a45050 !important; }
 /* 置顶聊天行的背景加深 */
 .recentChat.is-pinned-row {
     background: rgba(128, 128, 128, 0.08) !important; 
-}
-/* 适配暗色主题，如果觉得暗色下太黑，可以用这个微光 */
-[data-theme="dark"] .recentChat.is-pinned-row {
-    background: rgba(255, 255, 255, 0.05) !important;
 }
 
 /* 图钉的暗红状态 */
@@ -174,3 +172,71 @@
 .my-fold-content .recentChat:last-child {
     border-bottom: none !important;
 }
+
+/* 🚨 拾遗跳转：左侧档案条暗红呼吸特效（最终纯净版） */
+.mes.highlight-mes {
+    position: relative !important;
+}
+
+.mes.highlight-mes::after {
+    content: ""; 
+    position: absolute; 
+    top: 0; 
+    bottom: 0; 
+    left: 0; /* 贴着左侧 */
+    width: 4px; /* 档案条的宽度 */
+    pointer-events: none; 
+    z-index: 999;
+    background-color: #a45050; /* 暗红色 */
+    animation: quoteBreatheBar 2s ease-in-out forwards !important; 
+}
+
+@keyframes quoteBreatheBar {
+    0% { opacity: 0; box-shadow: 0 0 0 rgba(164,80,80,0); }
+    30% { opacity: 1; box-shadow: 0 0 15px 2px rgba(164,80,80,0.5); }
+    100% { opacity: 0; box-shadow: 0 0 0 rgba(164,80,80,0); }
+}
+
+/* 🚨 拾遗底部极简英文 */
+.quote-footer {
+    flex-shrink: 0;
+    padding: 12px 20px;
+    text-align: center;
+    border-top: 1px dashed rgba(164, 80, 80, 0.2);
+    background: rgba(164, 80, 80, 0.02);
+}
+
+.quote-footer .quote-poem-en {
+    font-family: 'Courier New', Courier, monospace; /* 极客等宽字体 */
+    font-size: 10px;
+    color: rgba(164, 80, 80, 0.6); /* 暗红色小字 */
+    letter-spacing: 4px; /* 拉开字间距，高级感来源 */
+    margin: 0;
+    text-transform: uppercase;
+}
+
+/* 🚨 室内空状态·现代诗 */
+.quote-empty { 
+    margin: auto; 
+    text-align: center; 
+    padding-bottom: 10vh; 
+}
+
+.quote-empty-cn { 
+    font-family: 'Noto Serif SC', 'Songti SC', serif; 
+    font-size: 16px; 
+    color: #6c5951; 
+    letter-spacing: 4px; /* 拉开字间距，显得更空旷 */
+    line-height: 2;
+    margin-bottom: 16px;
+    white-space: pre-wrap; /* 🚨 核心：让 \n 换行生效 */
+}
+
+.quote-empty-en { 
+    color: #a18d83; 
+    font-family: Georgia, 'Times New Roman', serif; 
+    font-size: 12px; 
+    font-style: italic; 
+    letter-spacing: 0.5px; 
+}
+
