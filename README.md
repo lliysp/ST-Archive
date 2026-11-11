@@ -40,11 +40,10 @@
   <em>PC端</em>
 </p>
 
+
 <p align="center">
-  <img src="<img width="1260" height="2800" alt="Screenshot_20261111_193807" src="https://github.com/user-attachments/assets/80cc25ad-2b79-4f08-a6ec-dead9c1b1702" />
-" width="45%" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); margin-right: 10px;">
-  <img src="<img width="1260" height="2800" alt="IMG_20261111_194206" src="https://github.com/user-attachments/assets/8e425838-456f-4872-8801-113f3b550509" />
-" width="45%" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);">
+  <img src="https://github.com/user-attachments/assets/006f68ca-64a1-4b7f-8090-9fb79a5cc773" width="45%" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); margin-right: 10px;">
+  <img src="https://github.com/user-attachments/assets/c379beb1-3f78-4029-a342-0c8455f946e9" width="45%" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);">
   <br>
   <em>手机端</em>
 </p>
