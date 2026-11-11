@@ -35,7 +35,7 @@
 测试主题：Dark Lite
 <p align="center">
   <img width="2549" height="1403" alt="image" src="https://github.com/user-attachments/assets/11260f80-ed59-40cf-98c6-5df07fe42d4d" width="90%" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);" />
-  <img width="2549" height="1403" alt="image" src="https://github.com/user-attachments/assets/855e4b9f-06d6-41f3-ac25-acdecbdabe5b" width="90%" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);" />
+  <img width="2549" height="1403" alt="image" src="https://github.com/user-attachments/assets/b1cd11e6-44db-44d2-bc2a-5fffaf693b9a" width="90%" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);" />
   <br>
   <em>PC端</em>
 </p>
@@ -43,7 +43,7 @@
 
 <p align="center">
   <img src="https://github.com/user-attachments/assets/006f68ca-64a1-4b7f-8090-9fb79a5cc773" width="45%" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); margin-right: 10px;">
-  <img src="https://github.com/user-attachments/assets/c379beb1-3f78-4029-a342-0c8455f946e9" width="45%" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);">
+  <img src="https://github.com/user-attachments/assets/17c293e1-73b1-4fa5-86af-18b4041ed1aa" width="45%" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);">
   <br>
   <em>手机端</em>
 </p>
