@@ -92,7 +92,9 @@ function archiveQuoteKey(quote) {
     const mesid = String(quote.mesid ?? '').trim();
     const char = String(quote.char ?? '').trim();
     const chatKey = String(quote.chatKey ?? '').trim();
-    if (chatKey) return `chat::${chatKey}::${mesid}::${char}`;
+    // 划词收藏允许在同一楼层里保存多段不同文字，正文必须参与去重键，否则会被当成重复项丢掉
+    const textPart = quote.source === 'selection' ? `::${String(quote.text ?? '').slice(0, 160)}` : '';
+    if (chatKey) return `chat::${chatKey}::${mesid}::${char}${textPart}`;
     return `legacy::${char}::${mesid}::${String(quote.text ?? '').slice(0, 160)}`;
 }
 
@@ -270,6 +272,23 @@ function getArchiveState() {
     return archiveState;
 }
 
+// 🚨 防闪屏的第一道闸：扩展 CSS 由酒馆在 initExtensions 阶段注入，
+// 正常情况下早于欢迎面板首次渲染；这里再同步写一份最小样式到 <head>，
+// 保证即使样式表加载被推迟，原生首页也来不及露脸。
+(function injectArchiveEarlyStyle() {
+    if (document.getElementById('st-archive-early-style')) return;
+
+    const style = document.createElement('style');
+    style.id = 'st-archive-early-style';
+    style.textContent = [
+        '#chat .welcomePanel .recentChatList{display:none !important;}',
+        '.mes_text .quote-underline{text-decoration-line:underline !important;',
+        'text-decoration-color:rgba(164,80,80,0.75) !important;',
+        'text-decoration-thickness:1.5px !important;text-underline-offset:3px !important;}',
+    ].join('');
+    (document.head || document.documentElement).appendChild(style);
+})();
+
 (function () {
     console.log("✨ [ST-档案馆] 终极组内置顶版已启动！");
 
@@ -314,7 +333,7 @@ function getArchiveState() {
         return { name, key };
     }
 
-    setInterval(function () {
+    function renderArchiveList() {
         const nativeList = document.querySelector('.recentChatList');
         if (!nativeList) return;
 
@@ -649,7 +668,68 @@ function getArchiveState() {
         nativeList.insertAdjacentElement('afterend', wrapper);
         nativeList.style.display = 'none';
         applySortAndFilter(true);
-    }, 200);
+    }
+
+    // 进入酒馆、关闭聊天、切换角色时，原生的欢迎面板会被整块重新渲染。
+    // 之前靠 200ms 轮询，最坏要等两帧才重建，中间那段空白就是“闪一下”的来源。
+    // 这里用 MutationObserver 在 DOM 变化的下一帧立刻重建，轮询只作为兜底。
+    let archiveRenderFrame = 0;
+
+    function runArchiveRender() {
+        try {
+            renderArchiveList();
+        } catch (error) {
+            console.warn('[ST-档案馆] 重建首页档案馆失败', error);
+        }
+    }
+
+    function queueArchiveRender() {
+        if (archiveRenderFrame) return;
+
+        const frame = requestAnimationFrame(() => {
+            archiveRenderFrame = 0;
+            runArchiveRender();
+        });
+        archiveRenderFrame = frame;
+
+        // 后台标签页、被遮挡的窗口里 rAF 可能一直不触发，
+        // 那样档案馆会永远停在空白页；这里用超时兜底，直接把这一帧补上。
+        setTimeout(() => {
+            if (archiveRenderFrame !== frame) return;
+            archiveRenderFrame = 0;
+            try {
+                cancelAnimationFrame(frame);
+            } catch (error) {
+                // 忽略：帧可能已经执行或已被浏览器丢弃
+            }
+            runArchiveRender();
+        }, 300);
+    }
+
+    function observeChatContainer() {
+        const chat = document.getElementById('chat');
+        if (!chat) {
+            // 极端情况下扩展比 #chat 先加载，等 DOM 就绪再挂
+            document.addEventListener('DOMContentLoaded', observeChatContainer, { once: true });
+            return;
+        }
+
+        // 只看 #chat 的直接子节点：欢迎面板整体换掉才会触发，
+        // 档案馆自己插进 welcomePanel 内部的重绘不会反过来触发自己。
+        try {
+            new MutationObserver(queueArchiveRender).observe(chat, { childList: true });
+        } catch (error) {
+            console.warn('[ST-档案馆] 监听首页容器失败', error);
+        }
+        queueArchiveRender();
+    }
+
+    observeChatContainer();
+    // 从别的窗口切回来时补一次，避免被遮挡期间错过重建
+    document.addEventListener('visibilitychange', () => {
+        if (!document.hidden) queueArchiveRender();
+    });
+    setInterval(queueArchiveRender, 200);
 })();
 
 (function () {
@@ -689,12 +769,16 @@ function getArchiveState() {
                 return;
             }
 
-            // 旧版本可能把模板按钮的 data-mesid="" 存了进来，这种记录无法定位楼层
+            // 旧版本可能把模板按钮的 data-mesid="" 存了进来，这种记录无法定位楼层；
+            // 但「划词收藏」允许收藏消息之外的文字，这类记录本身就没有楼层号，凭正文保留。
             const mesid = String(quote.mesid ?? '').trim();
-            if (!/^\d+$/.test(mesid)) {
+            const hasText = typeof quote.text === 'string' && quote.text.trim().length > 0;
+            const isFreeQuote = mesid === '' && hasText && (quote.source === 'selection' || Boolean(quote.chatKey));
+            if (!/^\d+$/.test(mesid) && !isFreeQuote) {
                 changed = true;
                 return;
             }
+            if (String(quote.mesid ?? '') !== mesid) changed = true;
 
             let char = normalizeCharName(quote.char);
             if (char.includes('${')) char = '未知角色';
@@ -839,16 +923,179 @@ function getArchiveState() {
         if (changed) saveQuotes();
     }
 
-    function getQuoteChatInfo(quote) {
-        const char = String(quote.chatChar || quote.char || '未知角色').trim() || '未知角色';
-        const chatName = String(quote.chatName || '').trim()
-            || (quote.chatKey ? '未命名聊天' : '历史收藏');
+    function stripChatFileExtension(value) {
+        return String(value ?? '').trim().replace(/\.jsonl$/i, '');
+    }
 
+    // chatKey 的形状固定为 `${scope}::${chatId}`，scope 内部不会出现 "::"
+    function splitChatKey(chatKey) {
+        const key = String(chatKey ?? '');
+        const index = key.lastIndexOf('::');
+        if (index < 0) return { scope: '', chatId: key };
+        return { scope: key.slice(0, index), chatId: key.slice(index + 2) };
+    }
+
+    // 角色名 / 群名同样取实时值：改过角色名之后，旧收藏也不该继续显示旧名字
+    function getLiveCharName(scope, fallback) {
+        const key = String(scope || '');
+        const ctx = getChatContext();
+
+        try {
+            if (ctx && key.startsWith('char:')) {
+                const avatar = key.slice(5);
+                const character = ctx.characters?.find?.(item => item?.avatar === avatar);
+                if (character?.name) return String(character.name).trim();
+            } else if (ctx && key.startsWith('group:')) {
+                const groupId = key.slice(6);
+                const group = ctx.groups?.find?.(item => String(item?.id) === groupId);
+                if (group?.name) return String(group.name).trim();
+            }
+        } catch (error) {
+            console.warn('[ST-档案馆] 解析角色/群实时名称失败', error);
+        }
+
+        return fallback;
+    }
+
+    // 聊天记录改名后文件也会改名，所以名字的唯一可靠来源是“当前渲染出来的最近聊天列表”。
+    // 这里把原生列表（即使被归档面板隐藏，节点仍在 DOM 里）解析成 chatKey -> 最新名字 的索引。
+    let liveChatNameCache = { at: 0, map: new Map() };
+
+    function invalidateLiveChatNameCache() {
+        liveChatNameCache = { at: 0, map: new Map() };
+    }
+
+    function getLiveChatNameIndex(force = false) {
+        const now = Date.now();
+        if (!force && now - liveChatNameCache.at < 1200) return liveChatNameCache.map;
+
+        const map = new Map();
+        document.querySelectorAll('.recentChatList .recentChat').forEach(item => {
+            const file = stripChatFileExtension(item.getAttribute('data-file'));
+            if (!file) return;
+
+            const avatar = item.getAttribute('data-avatar') || '';
+            const groupId = item.getAttribute('data-group') || '';
+            const scope = groupId ? `group:${groupId}` : (avatar ? `char:${avatar}` : '');
+            if (!scope) return;
+
+            // 原生结构：<div class="chatName"><strong class="characterName">角色</strong><span>-</span><span>聊天名</span></div>
+            let chatName = '';
+            const chatNameEl = item.querySelector('.chatName');
+            if (chatNameEl) {
+                const spans = chatNameEl.querySelectorAll('span');
+                const lastSpan = spans.length ? spans[spans.length - 1] : null;
+                chatName = String(lastSpan?.textContent || '').trim();
+                if (!chatName) chatName = stripChatFileExtension(chatNameEl.getAttribute('title'));
+            }
+            if (!chatName) chatName = file;
+
+            const charName = String(
+                item.querySelector('.chatName .characterName')?.textContent
+                || item.querySelector('.avatar img')?.getAttribute('alt')
+                || ''
+            ).trim();
+
+            map.set(`${scope}::${file}`, {
+                key: `${scope}::${file}`,
+                scope,
+                chatId: file,
+                chatName,
+                charName,
+            });
+        });
+
+        liveChatNameCache = { at: now, map };
+        return map;
+    }
+
+    /**
+     * 生成拾遗条目的来源信息。
+     * 名字永远现取：当前聊天上下文 > 最近聊天列表 > 收藏时存下的旧值。
+     */
+    function getQuoteChatInfo(quote, options = {}) {
+        const legacyChar = String(quote.chatChar || quote.char || '未知角色').trim() || '未知角色';
+        const storedName = String(quote.chatName || '').trim();
+        const { scope: keyScope, chatId: rawChatId } = splitChatKey(quote.chatKey);
+        const scope = String(quote.scope || keyScope || '').trim();
+        const chatId = stripChatFileExtension(rawChatId);
+
+        const current = options.current || getCurrentChatInfo();
+
+        // 1) 这条收藏属于当前打开的聊天：直接问上下文，永远是最新的名字
+        if (current.active && quote.chatKey && quote.chatKey === current.key) {
+            return {
+                key: quote.chatKey,
+                char: current.charName || getLiveCharName(scope, legacyChar) || legacyChar,
+                chatName: current.chatName || storedName || chatId || '未命名聊天',
+            };
+        }
+
+        // 2) 从最近聊天列表里按 scope + 文件名定位同名记录
+        const liveIndex = options.liveIndex || getLiveChatNameIndex();
+        const liveEntry = scope && chatId ? liveIndex.get(`${scope}::${chatId}`) : null;
+        if (liveEntry) {
+            return {
+                key: `${scope}::${chatId}`,
+                char: getLiveCharName(scope, liveEntry.charName || legacyChar) || legacyChar,
+                chatName: liveEntry.chatName || storedName || chatId || '未命名聊天',
+            };
+        }
+
+        // 3) 兜底：文件本身还在（只是列表里暂时没渲染），文件名就是聊天名
         return {
-            key: quote.chatKey || `legacy:${char}`,
-            char,
-            chatName,
+            key: quote.chatKey || (scope && chatId ? `${scope}::${chatId}` : `legacy:${legacyChar}`),
+            char: getLiveCharName(scope, legacyChar) || legacyChar,
+            chatName: storedName || chatId || (quote.chatKey ? '未命名聊天' : '历史收藏'),
         };
+    }
+
+    // 聊天改名时同步改写已存收藏的 chatKey，否则收藏会从「当前聊天」里消失
+    function handleChatRenamed(eventData) {
+        const data = eventData?.detail && typeof eventData.detail === 'object' ? eventData.detail : eventData;
+        if (!data || typeof data !== 'object') return;
+
+        const oldId = stripChatFileExtension(data.oldFileName);
+        const newId = stripChatFileExtension(data.newFileName);
+        if (!oldId || !newId || oldId === newId) return;
+
+        const renameScope = data.groupId
+            ? `group:${data.groupId}`
+            : (data.avatarId ? `char:${data.avatarId}` : '');
+
+        let changed = false;
+        savedQuotes.forEach(quote => {
+            if (!quote.chatKey) return;
+
+            const { scope, chatId } = splitChatKey(quote.chatKey);
+            if (stripChatFileExtension(chatId) !== oldId) return;
+            if (renameScope && scope && scope !== renameScope) return;
+
+            quote.chatKey = `${scope}::${newId}`;
+            quote.chatName = newId;
+            if (scope) quote.scope = scope;
+            changed = true;
+        });
+
+        invalidateLiveChatNameCache();
+
+        if (changed) {
+            saveQuotes();
+            renderQuotes();
+        }
+    }
+
+    function bindChatRenameListener() {
+        try {
+            const ctx = getChatContext();
+            const eventSource = ctx?.eventSource;
+            const eventTypes = ctx?.eventTypes || ctx?.event_types;
+            if (eventSource?.on && eventTypes?.CHAT_RENAMED) {
+                eventSource.on(eventTypes.CHAT_RENAMED, handleChatRenamed);
+            }
+        } catch (error) {
+            console.warn('[ST-档案馆] 监听聊天改名事件失败', error);
+        }
     }
 
     function messageHasQuote(mesid, charName, chatInfo, ctx) {
@@ -1186,6 +1433,9 @@ function getArchiveState() {
     let activeQuoteTab = 'current';
     const expandedQuoteGroups = new Set();
 
+    // 改名事件只发一次，越早挂上越好（不依赖面板是否打开）
+    bindChatRenameListener();
+
     function injectBookmarks() {
         const ctx = getChatContext();
         const chatInfo = getCurrentChatInfo();
@@ -1238,6 +1488,9 @@ function getArchiveState() {
 
             targetArea.appendChild(btn);
         });
+
+        // 每次同步楼层书签时顺手校准正文下划线（稳态下不做任何 DOM 修改）
+        applyQuoteUnderlines();
     }
 
     function renderQuotePoem(list) {
@@ -1395,6 +1648,8 @@ function getArchiveState() {
         saveQuotes();
         syncBookmarkAfterDelete(quote, chatInfo, ctx);
         renderQuotes();
+        // 取消收藏后正文里的下划线要立刻消失
+        applyQuoteUnderlines();
     }
 
     // ==================================================
@@ -1472,24 +1727,29 @@ function getArchiveState() {
         if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
 
         const mesid = String(raw.mesid ?? '').trim();
-        if (!/^\d+$/.test(mesid)) return null;
+        const text = String(raw.text ?? '');
+        const chatKey = String(raw.chatKey ?? '').trim();
+        const isFreeQuote = mesid === '' && text.trim().length > 0
+            && (raw.source === 'selection' || Boolean(chatKey));
+        if (!/^\d+$/.test(mesid) && !isFreeQuote) return null;
 
         let char = normalizeCharName(raw.char ?? '');
         if (char.includes('${')) char = '未知角色';
 
-        const text = String(raw.text ?? '');
         if (!text.trim()) return null;
 
-        return {
+        const quote = {
             mesid,
             char,
             text,
             time: String(raw.time ?? '').trim() || new Date().toLocaleString(),
-            chatKey: String(raw.chatKey ?? '').trim(),
+            chatKey,
             chatName: String(raw.chatName ?? '').trim(),
             chatChar: raw.chatChar ? normalizeCharName(raw.chatChar) : char,
             scope: String(raw.scope ?? '').trim(),
         };
+        if (raw.source === 'selection') quote.source = 'selection';
+        return quote;
     }
 
     function mergeImportedQuotes(rawList) {
@@ -1631,8 +1891,15 @@ function getArchiveState() {
             }
 
             const mesid = String(quote.mesid ?? '');
-            const targetMes = document.querySelector(`.mes[mesid="${CSS.escape(mesid)}"]`);
-            if (!targetMes) return;
+            const targetMes = mesid
+                ? document.querySelector(`.mes[mesid="${CSS.escape(mesid)}"]`)
+                : null;
+
+            // 划词收藏可能来自消息以外的文字（没有楼层号），这时改为打开详情而不是无声失败
+            if (!targetMes) {
+                showQuoteDetail(quote);
+                return;
+            }
 
             closeQuotePanel();
             
@@ -1761,6 +2028,641 @@ function getArchiveState() {
         if (list) list.scrollTop = 0;
     }
 
+    // ==================================================
+    // 划词 / 划句收藏
+    // 在正文里选中任意一段文字（鼠标拖动或手机长按），选区旁就会浮出一个极简收藏按钮。
+    // 收藏时只保存选中的那一段，而不是整层消息。
+    // ==================================================
+
+    const SELECTION_IGNORE_SELECTOR = [
+        '#quote-fab',
+        '#quote-selection-btn',
+        '#quote-overlay',
+        '#quote-panel',
+        '#quote-detail-overlay',
+        '#quote-detail-overlay *',
+        '.mes_buttons',
+        '.mes_avatar',
+        '.mes_metadata',
+        'input',
+        'textarea',
+        'select',
+        'option',
+        '[contenteditable="true"]',
+        '.drawer-content',
+        '#send_form',
+    ].join(', ');
+
+    // ---- 收藏文字的下划线 ----
+    const QUOTE_MARK_CLASS = 'quote-underline';
+    const QUOTE_MARK_SELECTOR = '.mes_text .quote-underline';
+    let underlineBusy = false;
+
+    function normalizeQuoteText(value) {
+        return String(value ?? '')
+            .replace(/\u00a0/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+
+    // 只有“整段划句”的收藏才在正文里画线：整层消息收藏画线只会污染整篇正文
+    function getCurrentSelectionQuotes(chatInfo) {
+        const info = chatInfo || getCurrentChatInfo();
+        if (!info.active) return [];
+
+        return savedQuotes.filter(quote => {
+            if (quote.source !== 'selection') return false;
+            if (String(quote.chatKey || '') !== String(info.key || '')) return false;
+            if (!/^\d+$/.test(String(quote.mesid ?? ''))) return false;
+            return normalizeQuoteText(quote.text).length > 0;
+        });
+    }
+
+    // 同一条划句的判据底座：同一楼层 + 同一聊天
+    function isSelectionQuoteOfMessage(quote, payload, chatInfo) {
+        if (!quote || quote.source !== 'selection') return false;
+
+        const mesid = String(payload?.mes?.getAttribute('mesid') ?? '').trim();
+        if (String(quote.mesid ?? '') !== mesid) return false;
+        if (quote.chatKey && chatInfo?.key && String(quote.chatKey) !== String(chatInfo.key)) return false;
+
+        return true;
+    }
+
+    // 完全同一句（空白差异不算不同）—— 只用于「再点一次取消收录」
+    function isSameSelectionQuote(quote, payload, chatInfo) {
+        if (!isSelectionQuoteOfMessage(quote, payload, chatInfo)) return false;
+        return normalizeQuoteText(quote.text) === normalizeQuoteText(payload?.text);
+    }
+
+    function findSelectionMatches(payload, chatInfo) {
+        return savedQuotes.filter(quote => isSameSelectionQuote(quote, payload, chatInfo));
+    }
+
+    // 已收藏的更长语录里已经包含了这次选中的片段 → 不允许再存一条短的
+    function findContainingQuotes(payload, chatInfo) {
+        const selection = normalizeQuoteText(payload?.text);
+        if (!selection) return [];
+
+        return savedQuotes.filter(quote => {
+            if (!isSelectionQuoteOfMessage(quote, payload, chatInfo)) return false;
+            const stored = normalizeQuoteText(quote.text);
+            return stored.length > selection.length && stored.includes(selection);
+        });
+    }
+
+    // 这次选区比已收藏的短句更长，并且完整包含了它 → 应该升级成这条长句
+    function findContainedQuotes(payload, chatInfo) {
+        const selection = normalizeQuoteText(payload?.text);
+        if (!selection) return [];
+
+        return savedQuotes.filter(quote => {
+            if (!isSelectionQuoteOfMessage(quote, payload, chatInfo)) return false;
+            const stored = normalizeQuoteText(quote.text);
+            return stored.length > 0 && stored.length < selection.length && selection.includes(stored);
+        });
+    }
+
+    function escapeRegExp(value) {
+        return String(value ?? '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+
+    // 把正文里的文本节点串成一条字符串，同时记住每个节点对应的区间
+    function buildMessageTextMap(container) {
+        const nodes = [];
+        let text = '';
+
+        const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, {
+            acceptNode(node) {
+                if (!node.nodeValue) return NodeFilter.FILTER_REJECT;
+                const parent = node.parentElement;
+                if (!parent) return NodeFilter.FILTER_REJECT;
+                // 已经画过线的段落不再参与匹配，避免反复套娃；脚本、按钮栏也不看
+                if (parent.closest(`script, style, .mes_buttons, .${QUOTE_MARK_CLASS}`)) {
+                    return NodeFilter.FILTER_REJECT;
+                }
+                return NodeFilter.FILTER_ACCEPT;
+            },
+        });
+
+        let node = walker.nextNode();
+        while (node) {
+            const value = String(node.nodeValue).replace(/\u00a0/g, ' ');
+            nodes.push({ node, start: text.length, end: text.length + value.length });
+            text += value;
+            node = walker.nextNode();
+        }
+
+        return { text, nodes };
+    }
+
+    function buildCompactIndex(text) {
+        const index = [];
+        let compact = '';
+        for (let i = 0; i < text.length; i++) {
+            if (/\s/.test(text[i])) continue;
+            compact += text[i];
+            index.push(i);
+        }
+        return { compact, index };
+    }
+
+    // 在正文里定位收藏文字：空白按 \s+ 容错（换行、缩进、选区补出的空白都能对上）
+    function findQuoteTextRange(map, rawText) {
+        if (!map?.text) return null;
+
+        const normalized = normalizeQuoteText(rawText);
+        if (!normalized) return null;
+
+        const pattern = normalized.split(/\s+/).map(escapeRegExp).join('\\s+');
+        try {
+            const match = new RegExp(pattern).exec(map.text);
+            if (match) return { start: match.index, end: match.index + match[0].length };
+        } catch (error) {
+            // 忽略：退回下面的去空白匹配
+        }
+
+        // 兜底：DOM 里没有空白（跨 <br>、跨块元素）时，按“去掉空白”再比一次
+        const { compact, index } = buildCompactIndex(map.text);
+        const bare = normalized.replace(/\s+/g, '');
+        if (!bare || !compact) return null;
+
+        const at = compact.indexOf(bare);
+        if (at < 0) return null;
+        return { start: index[at], end: index[at + bare.length - 1] + 1 };
+    }
+
+    function wrapQuoteTextRange(map, start, end, key) {
+        if (!map?.nodes?.length || !(end > start)) return;
+
+        const segments = [];
+        map.nodes.forEach(entry => {
+            const from = Math.max(start, entry.start);
+            const to = Math.min(end, entry.end);
+            if (to <= from) return;
+            segments.push({ node: entry.node, from: from - entry.start, to: to - entry.start });
+        });
+
+        segments.forEach(({ node, from, to }) => {
+            if (!node.parentNode) return;
+
+            let target = node;
+            if (from > 0) target = target.splitText(from);
+
+            const length = to - from;
+            if (length > 0 && length < target.nodeValue.length) target.splitText(length);
+
+            const mark = document.createElement('span');
+            mark.className = QUOTE_MARK_CLASS;
+            mark.setAttribute('data-quote-key', key);
+            target.parentNode.insertBefore(mark, target);
+            mark.appendChild(target);
+        });
+    }
+
+    function unwrapQuoteMark(mark) {
+        const parent = mark?.parentNode;
+        if (!parent) return;
+
+        while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
+        parent.removeChild(mark);
+        parent.normalize();
+    }
+
+    /**
+     * 让正文下划线与收藏列表保持一致：
+     * 有收藏但没线 → 补上；收藏被取消 / 切到别的聊天 / 消息重绘 → 去掉。
+     * 稳态下这里不碰任何 DOM，所以不会打断正在拖动的选区。
+     */
+    function applyQuoteUnderlines() {
+        if (underlineBusy) return;
+        underlineBusy = true;
+
+        try {
+            const chatInfo = getCurrentChatInfo();
+            const wanted = new Map();
+
+            getCurrentSelectionQuotes(chatInfo).forEach(quote => {
+                const key = archiveQuoteKey(quote);
+                if (key && !wanted.has(key)) wanted.set(key, quote);
+            });
+
+            // 1. 拆掉不该存在的线
+            document.querySelectorAll(QUOTE_MARK_SELECTOR).forEach(mark => {
+                const key = mark.getAttribute('data-quote-key') || '';
+                if (!wanted.has(key)) unwrapQuoteMark(mark);
+            });
+
+            if (!wanted.size) return;
+
+            // 2. 补上缺的线；长句优先，避免短句先占位把长句的匹配切断
+            const existing = new Set(
+                Array.from(document.querySelectorAll(QUOTE_MARK_SELECTOR))
+                    .map(mark => mark.getAttribute('data-quote-key') || '')
+            );
+
+            const pending = Array.from(wanted.entries())
+                .filter(([key]) => !existing.has(key))
+                .sort((a, b) => String(b[1].text || '').length - String(a[1].text || '').length);
+
+            pending.forEach(([key, quote]) => {
+                const mesid = String(quote.mesid ?? '');
+                if (!/^\d+$/.test(mesid)) return;
+
+                const container = document.querySelector(`.mes[mesid="${CSS.escape(mesid)}"] .mes_text`);
+                if (!container) return;
+
+                const map = buildMessageTextMap(container);
+                const range = findQuoteTextRange(map, quote.text);
+                if (!range) return;
+
+                wrapQuoteTextRange(map, range.start, range.end, key);
+            });
+        } catch (error) {
+            console.warn('[ST-档案馆] 绘制收藏下划线失败', error);
+        } finally {
+            underlineBusy = false;
+        }
+    }
+
+    const selectionBtn = document.createElement('div');
+    selectionBtn.id = 'quote-selection-btn';
+    selectionBtn.title = '收录选中文字';
+    selectionBtn.setAttribute('role', 'button');
+    selectionBtn.setAttribute('aria-label', '收录选中文字');
+    selectionBtn.innerHTML = '<i class="fa-regular fa-bookmark"></i>';
+    document.body.appendChild(selectionBtn);
+
+    let selectionPayload = null;
+    let selectionCheckTimer = 0;
+
+    function isIgnoredSelectionNode(node) {
+        const el = node?.nodeType === 1 ? node : node?.parentElement;
+        if (!el) return true;
+        try {
+            return Boolean(el.closest(SELECTION_IGNORE_SELECTOR));
+        } catch (error) {
+            return true;
+        }
+    }
+
+    function findMessageForNode(node) {
+        const el = node?.nodeType === 1 ? node : node?.parentElement;
+        if (!el) return null;
+
+        const mes = el.closest('.mes');
+        if (!mes) return null;
+        if (mes.closest('.template_element') || mes.closest('#message_template')) return null;
+        if (!mes.isConnected) return null;
+        return mes;
+    }
+
+    function captureSelection() {
+        const selection = window.getSelection();
+        if (!selection || selection.isCollapsed || selection.rangeCount === 0) return null;
+
+        if (isIgnoredSelectionNode(selection.anchorNode) || isIgnoredSelectionNode(selection.focusNode)) {
+            return null;
+        }
+
+        const text = String(selection.toString() || '').replace(/\u00a0/g, ' ').trim();
+        if (!text) return null;
+
+        let rect = null;
+        try {
+            const range = selection.getRangeAt(0);
+            const rects = Array.from(range.getClientRects()).filter(item => item.width > 0 || item.height > 0);
+            const box = rects.length ? rects[rects.length - 1] : range.getBoundingClientRect();
+            if (box && (box.width > 0 || box.height > 0)) {
+                rect = { left: box.left, right: box.right, top: box.top, bottom: box.bottom, width: box.width, height: box.height };
+            }
+        } catch (error) {
+            console.warn('[ST-档案馆] 解析选区位置失败', error);
+        }
+
+        // 手机长按选词时有时拿不到 client rect，退回选区焦点所在的元素
+        if (!rect) {
+            const anchorEl = selection.focusNode?.nodeType === 1
+                ? selection.focusNode
+                : selection.focusNode?.parentElement;
+            const box = anchorEl?.getBoundingClientRect?.();
+            if (box && (box.width > 0 || box.height > 0)) {
+                rect = { left: box.left, right: box.right, top: box.top, bottom: box.bottom, width: box.width, height: box.height };
+            }
+        }
+
+        if (!rect) return null;
+
+        return {
+            text,
+            rect,
+            mes: findMessageForNode(selection.anchorNode) || findMessageForNode(selection.focusNode),
+        };
+    }
+
+    function placeSelectionBtn(rect) {
+        const size = 34;
+        const margin = 8;
+        // 选区 client rect 与 position: fixed 都以布局视口为基准，这里直接用 innerWidth/innerHeight，
+        // 不要混用 visualViewport 的宽高（双指缩放时会错位）
+        const viewportWidth = window.innerWidth;
+        const viewportHeight = window.innerHeight;
+        if (!viewportWidth || !viewportHeight) return;
+
+        let left = rect.left + (rect.width / 2) - (size / 2);
+        let top = rect.bottom + margin;
+
+        // 下面放不下就翻到选区上方，永远不出屏幕
+        if (top + size > viewportHeight - margin) top = rect.top - size - margin;
+
+        left = Math.min(Math.max(left, margin), viewportWidth - size - margin);
+        top = Math.min(Math.max(top, margin), viewportHeight - size - margin);
+
+        selectionBtn.style.left = `${Math.round(left)}px`;
+        selectionBtn.style.top = `${Math.round(top)}px`;
+    }
+
+    function showSelectionBtn(payload) {
+        if (!payload) {
+            hideSelectionBtn({ clear: true });
+            return;
+        }
+
+        selectionPayload = payload;
+        placeSelectionBtn(payload.rect);
+
+        // 四种状态：全新收藏 / 升级更长 / 已包含在更长收藏里 / 已收过（再点取消）
+        const chatInfo = getCurrentChatInfo();
+        const exact = findSelectionMatches(payload, chatInfo).length > 0;
+        const covering = exact ? [] : findContainingQuotes(payload, chatInfo);
+        const expanding = (exact || covering.length) ? [] : findContainedQuotes(payload, chatInfo);
+
+        let title = '收录选中文字';
+        let icon = '<i class="fa-regular fa-bookmark"></i>';
+
+        if (exact) {
+            title = '取消收录';
+            icon = '<i class="fa-solid fa-bookmark"></i>';
+        } else if (covering.length > 0) {
+            // 只是已收藏长句的一小段：不能再存一条，按钮保持实心以示“已收录”
+            title = '已收录更长版本';
+            icon = '<i class="fa-solid fa-bookmark"></i>';
+        } else if (expanding.length > 0) {
+            title = '升级为更长收藏';
+        }
+
+        selectionBtn.classList.toggle('saved', exact || covering.length > 0);
+        selectionBtn.classList.toggle('covered', covering.length > 0);
+        selectionBtn.classList.toggle('expand', expanding.length > 0);
+        selectionBtn.title = title;
+        selectionBtn.setAttribute('aria-label', title);
+        selectionBtn.innerHTML = icon;
+        selectionBtn.classList.add('show');
+    }
+
+    // 只负责把按钮藏起来；截获的选区文字先留着，
+    // 因为触屏点按钮时浏览器会先清空选区，清空过早会让最后一次点击落空。
+    function hideSelectionBtn(options = {}) {
+        const clear = options && options.clear === true;
+        selectionBtn.classList.remove('show');
+        if (clear) selectionPayload = null;
+    }
+
+    function isQuoteUiVisible() {
+        return isQuoteDetailOpen() || overlay.classList.contains('show');
+    }
+
+    function scheduleSelectionCheck(delay) {
+        clearTimeout(selectionCheckTimer);
+        selectionCheckTimer = setTimeout(() => {
+            if (isQuoteUiVisible()) {
+                hideSelectionBtn({ clear: true });
+                return;
+            }
+            showSelectionBtn(captureSelection());
+        }, delay);
+    }
+
+    function clearSelection() {
+        try {
+            window.getSelection()?.removeAllRanges();
+        } catch (error) {
+            // 忽略：部分内嵌浏览器不支持 removeAllRanges
+        }
+    }
+
+    function commitSelectionQuote() {
+        const payload = selectionPayload;
+        if (!payload) return;
+
+        const chatInfo = getCurrentChatInfo();
+        const mes = payload.mes;
+
+        // 这一句之前已经收过：再点一次就是取消收录（需求里“再次选择这句话取消收藏”）
+        const matches = findSelectionMatches(payload, chatInfo);
+        if (matches.length > 0) {
+            savedQuotes = savedQuotes.filter(quote => !matches.includes(quote));
+            saveQuotes();
+            renderQuotes();
+            injectBookmarks();
+            applyQuoteUnderlines();
+
+            showArchiveToast('info', '已取消收录');
+            hideSelectionBtn({ clear: true });
+            clearSelection();
+            return;
+        }
+
+        // 这次选得比上次长，并且完整包含了已存的短句：把那条升级成这条长句，
+        // 不新增重复条目（多条被包含的短句一起并进来）
+        const contained = findContainedQuotes(payload, chatInfo);
+        if (contained.length > 0) {
+            const keep = contained[0];
+            const merged = new Set(contained.slice(1));
+
+            savedQuotes = savedQuotes.filter(quote => !merged.has(quote));
+            keep.text = payload.text;
+            keep.time = new Date().toLocaleString();
+            if (!keep.chatKey && chatInfo.key) keep.chatKey = chatInfo.key;
+            if (!keep.chatName && chatInfo.chatName) keep.chatName = chatInfo.chatName;
+
+            saveQuotes();
+            renderQuotes();
+            injectBookmarks();
+            applyQuoteUnderlines();
+
+            showArchiveToast('success', `已升级为更长的一段（${payload.text.length} 字）`);
+            hideSelectionBtn({ clear: true });
+            clearSelection();
+            return;
+        }
+
+        // 这次只是已收藏长句里的一小段：禁止重复添加
+        const covering = findContainingQuotes(payload, chatInfo);
+        if (covering.length > 0) {
+            showArchiveToast('info', '这段已包含在已收录的句子里');
+            hideSelectionBtn({ clear: true });
+            clearSelection();
+            return;
+        }
+
+        const mesid = String(mes?.getAttribute('mesid') ?? '').trim();
+        const nameEl = mes?.querySelector('.ch_name .name_text');
+        const charName = normalizeCharName(
+            (nameEl?.textContent || mes?.getAttribute('ch_name') || chatInfo.charName || '未知角色').trim()
+        );
+
+        const targetText = normalizeForCompare(payload.text);
+        const duplicate = savedQuotes.some(quote => (
+            String(quote.mesid ?? '') === mesid
+            && quote.char === charName
+            && String(quote.chatKey ?? '') === String(chatInfo.key ?? '')
+            && normalizeForCompare(quote.text) === targetText
+        ));
+
+        if (duplicate) {
+            showArchiveToast('info', '这段文字已经收录过了');
+            hideSelectionBtn({ clear: true });
+            clearSelection();
+            return;
+        }
+
+        savedQuotes.push({
+            mesid,
+            char: charName,
+            text: payload.text,
+            time: new Date().toLocaleString(),
+            chatKey: chatInfo.key || '',
+            chatName: chatInfo.chatName || '',
+            chatChar: chatInfo.charName || charName,
+            scope: chatInfo.scope || '',
+            source: 'selection',
+        });
+
+        saveQuotes();
+        renderQuotes();
+        injectBookmarks();
+
+        showArchiveToast('success', `已收录 ${payload.text.length} 字`);
+        hideSelectionBtn({ clear: true });
+        clearSelection();
+    }
+
+    document.addEventListener('mouseup', (event) => {
+        if (event.target?.closest?.('#quote-selection-btn')) return;
+        // 等浏览器把选区落定后再取，否则拿到的是上一帧的空选区
+        scheduleSelectionCheck(10);
+    });
+
+    document.addEventListener('touchend', (event) => {
+        if (event.target?.closest?.('#quote-selection-btn')) return;
+        scheduleSelectionCheck(90);
+    });
+
+    // 右键时如果已经有选区，也把按钮放出来（原生菜单不受影响）
+    document.addEventListener('contextmenu', (event) => {
+        if (event.target?.closest?.('#quote-selection-btn')) return;
+        scheduleSelectionCheck(10);
+    });
+
+    document.addEventListener('selectionchange', () => {
+        const selection = window.getSelection();
+        if (!selection || selection.isCollapsed) {
+            hideSelectionBtn();
+            return;
+        }
+
+        // 手机上拖动选区手柄时没有 mouseup/touchend，按钮要跟着选区重新贴位
+        if (!selectionBtn.classList.contains('show')) return;
+        clearTimeout(selectionCheckTimer);
+        selectionCheckTimer = setTimeout(() => {
+            if (isQuoteUiVisible()) {
+                hideSelectionBtn({ clear: true });
+                return;
+            }
+            const payload = captureSelection();
+            if (payload) showSelectionBtn(payload);
+        }, 80);
+    });
+
+    document.addEventListener('mousedown', (event) => {
+        if (event.target?.closest?.('#quote-selection-btn')) return;
+        hideSelectionBtn({ clear: true });
+    });
+
+    // 滚动时按钮跟着选区走，而不是直接消失（手机上选区常伴随小幅滚动）
+    let selectionScrollTimer = 0;
+    document.addEventListener('scroll', () => {
+        if (!selectionBtn.classList.contains('show')) return;
+        clearTimeout(selectionScrollTimer);
+        selectionScrollTimer = setTimeout(() => {
+            const selection = window.getSelection();
+            if (!selection || selection.isCollapsed) {
+                hideSelectionBtn({ clear: true });
+                return;
+            }
+            showSelectionBtn(captureSelection());
+        }, 120);
+    }, true);
+
+    window.addEventListener('resize', () => hideSelectionBtn({ clear: true }));
+    window.addEventListener('orientationchange', () => hideSelectionBtn({ clear: true }));
+
+    // 鼠标按下按钮时不要丢掉选区；触屏的选区清空无所谓，文字已经存在 payload 里
+    selectionBtn.addEventListener('pointerdown', (event) => {
+        if (event.pointerType === 'mouse') event.preventDefault();
+        event.stopPropagation();
+    });
+
+    selectionBtn.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        commitSelectionQuote();
+    });
+
+    // 点一下已划线的句子：只把它选起来，交给悬浮书签做二次确认，绝不直接删除。
+    // 用捕获阶段接管，避免这一下点击被消息层的其它事件吃掉。
+    document.addEventListener('click', (event) => {
+        const mark = event.target?.closest?.('.mes_text .quote-underline');
+        if (!mark) return;
+
+        event.preventDefault();
+        event.stopPropagation();
+
+        try {
+            // 一条收藏可能被拆成多个 span（跨段落时每个文本节点一段），
+            // 点任意一段都要选中整句，而不是只选中这一小截。
+            const key = mark.getAttribute('data-quote-key') || '';
+            const marks = key
+                ? Array.from(document.querySelectorAll(`.mes_text .quote-underline[data-quote-key="${CSS.escape(key)}"]`))
+                : [mark];
+            const list = marks.length ? marks : [mark];
+
+            const first = list[0];
+            const last = list[list.length - 1];
+            const startNode = first.firstChild;
+            const endNode = last.lastChild;
+
+            const range = document.createRange();
+            if (startNode && endNode) {
+                range.setStart(startNode, 0);
+                range.setEnd(endNode, endNode.nodeType === 3 ? endNode.nodeValue.length : endNode.childNodes.length);
+            } else {
+                range.selectNodeContents(first);
+            }
+
+            const selection = window.getSelection();
+            selection.removeAllRanges();
+            selection.addRange(range);
+        } catch (error) {
+            console.warn('[ST-档案馆] 选中已收藏句子失败', error);
+            return;
+        }
+
+        // mousedown/mouseup 会先把按钮藏起来，这一轮事件收尾后再把它摆出来
+        scheduleSelectionCheck(20);
+    }, true);
+
     // 4. 全局事件委托（确保点击生效）
     document.body.addEventListener('click', (e) => {
         const btn = e.target.closest('.mes-bookmark-btn');
@@ -1826,6 +2728,7 @@ function getArchiveState() {
 
         saveQuotes();
         renderQuotes();
+        applyQuoteUnderlines();
     });
 
     // 5. 悬浮窗事件
@@ -1835,6 +2738,8 @@ function getArchiveState() {
             return;
         }
 
+        // 打开面板时强制刷新一次最近聊天名字索引，避免别处刚改过名还显示旧名字
+        invalidateLiveChatNameCache();
         setQuoteTab('current');
         overlay.classList.add('show');
     });

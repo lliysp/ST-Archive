@@ -111,6 +111,11 @@ body:has(#chat .welcomePanel) #chat > div.mes[mesid="0"][ch_name="Assistant"] { 
 .welcomeHeader, .welcomeHeaderTitle { display: none !important; }
 .welcomeRecent { width: 100% !important; }
 
+/* 🚨 防闪屏：原生最近聊天列表在“第一次绘制”时就必须不可见。
+   数据依旧从这些节点里读，只是不给它露脸的机会——进入酒馆、关闭聊天时
+   都不会先闪一下黑白分明的原生首页，等档案馆重建完再自然出现。 */
+#chat .welcomePanel .recentChatList { display: none !important; }
+
 .welcomeRecent::before { content: "档 案 馆"; display: block; text-align: center; font-size: 24px; letter-spacing: 15px; color: #8b3a3a; font-weight: 600; font-family: 'Noto Serif SC', 'SimSun', serif; margin-bottom: 6px; text-shadow: 0 0 10px rgba(139, 58, 58, 0.1); white-space: nowrap; }
 .welcomeRecent::after { content: "C O N F I D E N T I A L   A R C H I V E"; display: block; text-align: center; font-size: clamp(7px, 2vw, 10px); letter-spacing: 3px; color: #888888; font-family: 'Courier New', Courier, monospace; margin-bottom: 15px; text-transform: uppercase; white-space: nowrap; overflow: hidden; }
 
@@ -317,4 +322,94 @@ body:has(#chat .welcomePanel) #chat > div.mes[mesid="0"][ch_name="Assistant"] { 
 /* 4. 给弹窗本体的背景提一点点亮度，避免纯黑死黑 */
 #quote-detail-overlay .quote-detail-panel {
     background: color-mix(in srgb, var(--SmartThemeBlurTintColor) 95%, #ffffff 5%) !important;
+}
+
+/* ==================================================
+   🚨 划词收藏：选中文字后浮出的极简按钮
+   ================================================== */
+#quote-selection-btn {
+    position: fixed;
+    z-index: 2147483100;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    border: 1px solid rgba(164, 80, 80, 0.55);
+    background: var(--SmartThemeBlurTintColor, #FDFBF7);
+    color: #a45050;
+    box-shadow: 0 4px 14px rgba(164, 80, 80, 0.28);
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+    opacity: 0;
+    transform: translateY(4px) scale(0.92);
+    transition: opacity 0.16s ease, transform 0.16s ease, background 0.16s ease;
+}
+
+#quote-selection-btn.show {
+    display: flex;
+    opacity: 1;
+    transform: translateY(0) scale(1);
+}
+
+#quote-selection-btn:hover {
+    background: color-mix(in srgb, #a45050 12%, var(--SmartThemeBlurTintColor, #FDFBF7));
+}
+
+#quote-selection-btn:active {
+    transform: scale(0.94);
+}
+
+#quote-selection-btn.saved {
+    background: color-mix(in srgb, #a45050 18%, var(--SmartThemeBlurTintColor, #FDFBF7));
+    border-color: #a45050;
+}
+
+/* 选区只是已收藏长句里的一小段：虚线边框，点下去只提示、不新增 */
+#quote-selection-btn.covered {
+    border-style: dashed;
+    color: color-mix(in srgb, #a45050 60%, var(--SmartThemeBodyColor, #333));
+}
+
+/* 选区比已收藏的短句更长：点击会把旧条目升级成这条长句 */
+#quote-selection-btn.expand {
+    border-color: #a45050;
+    box-shadow: 0 4px 14px rgba(164, 80, 80, 0.16);
+}
+
+/* ==================================================
+   🚨 划句收藏：被收录文字的下划线
+   只作用于正文，不改变字号/行高/颜色，取消收录后整段自然恢复。
+   ================================================== */
+.mes_text .quote-underline {
+    text-decoration-line: underline !important;
+    text-decoration-style: solid !important;
+    text-decoration-color: rgba(164, 80, 80, 0.75) !important;
+    text-decoration-thickness: 1.5px !important;
+    text-underline-offset: 3px !important;
+    background: rgba(164, 80, 80, 0.06);
+    border-radius: 2px;
+    cursor: pointer;
+}
+
+.mes_text .quote-underline:hover {
+    background: rgba(164, 80, 80, 0.14);
+}
+
+
+/* 🚨 暴力隐藏顶部三大控制台按钮 */
+.custom-flex-container {
+    display: none !important;
+}
+
+/* 或者单单隐藏这几个按钮 */
+.drawer-opener {
+    display: none !important;
 }
