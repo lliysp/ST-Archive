@@ -38,20 +38,32 @@
 - **拖拽**：悬浮球支持全端拖拽。
 
 ## 界面预览
-测试主题：Dark Lite
+测试环境：SillyTarven v1.19.0，主题 Dark Lite，pc端 windows11,手机端 android16
 <p align="center">
-  <img width="2549" height="1403" alt="image" src="https://github.com/user-attachments/assets/11260f80-ed59-40cf-98c6-5df07fe42d4d" width="90%" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);" />
-  <img width="2549" height="1403" alt="image" src="https://github.com/user-attachments/assets/b1cd11e6-44db-44d2-bc2a-5fffaf693b9a" width="90%" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);" />
-  <br>
-  <em>PC端</em>
+  <img width="2549" height="1403" alt="image" src="https://github.com/user-attachments/assets/ba2c40c5-37af-4a94-82d9-b4fd65939b84" width="90%" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);" />
+  <em>PC端-首页</em>
+  <p align="center">
+  <img width="1156" height="152" alt="image" src="https://github.com/user-attachments/assets/58f6589e-083d-477b-a752-810fbf11fd43" width="90%" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);" />
+  <em>PC端-划线收藏</em>
+</p>
+<p align="center">
+  <img width="2549" height="1403" alt="image" src="https://github.com/user-attachments/assets/b12be31a-0e54-4e6e-812b-776990c3c548" width="90%" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);" />
+  <em>PC端-书签详情</em>
 </p>
 
-
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/006f68ca-64a1-4b7f-8090-9fb79a5cc773" width="45%" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); margin-right: 10px;">
-  <img src="https://github.com/user-attachments/assets/17c293e1-73b1-4fa5-86af-18b4041ed1aa" width="45%" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);">
-  <br>
-  <em>手机端</em>
+  <img src="https://github.com/user-attachments/assets/75daf706-c93a-4c3b-a6d3-fc75168825cb" width="31%" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);">
+  &nbsp;&nbsp;&nbsp; 
+  <img src="https://github.com/user-attachments/assets/b30bc624-df24-4901-aa49-8061d33f4f3b" width="31%" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);">
+  &nbsp;&nbsp;&nbsp; 
+  <img src="https://github.com/user-attachments/assets/a5e4e63d-2bad-48f7-b8c1-5bb48139ae69" width="31%" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);">
+</p>
+<p align="center">
+  <em>手机端-首页</em>
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <em>手机端-划线收藏</em>
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <em>手机端-书签详情</em>
 </p>
 
 ## 安装方法
@@ -64,12 +76,12 @@
 ### 方法二：手动安装
 将本仓库的 `manifest.json`、`index.js`、`style.css` 放入酒馆的 `public/scripts/extensions/third-party/ST-Archive` 目录下，重启酒馆。
 
+## 叠甲
+本扩展为作者根据个人喜好深度定制的 UI 扩展，代码撰写和测试均在pc端进行，不保证与所有酒馆版本/主题完美兼容，不提供任何技术支持，不定期更新。如果觉得好看并认为项目没有问题，欢迎使用。
+
 ## 开发者
 - UI/交互设计/前端重构/测试：lliysp
 - 底层逻辑/架构支持：DeepSeek
-
-## 叠甲
-本扩展为作者根据个人喜好深度定制的 UI 扩展，仅作个人备份，代码撰写和测试均在pc端进行。不保证与所有酒馆版本/主题完美兼容，不提供任何技术支持与 BUG 修复，不定期更新。如果你觉得好看并且信任作者和deepseek，欢迎fork使用。
 
 ## 📄 License
 MIT License
