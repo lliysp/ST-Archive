@@ -1098,10 +1098,17 @@ function getArchiveState() {
         }
     }
 
+    // 整层消息收藏（无 source）与划词/划句收藏（source === 'selection'）是两类记录：
+    // 楼层书签只代表“整层已收录”，不能被划词收藏点亮，取消时也不能误删划词记录。
+    function isWholeMessageQuote(quote) {
+        return Boolean(quote) && quote.source !== 'selection';
+    }
+
     function messageHasQuote(mesid, charName, chatInfo, ctx) {
         if (!chatInfo?.active) return false;
 
         return savedQuotes.some(quote => {
+            if (!isWholeMessageQuote(quote)) return false;
             if (String(quote.mesid) !== String(mesid) || quote.char !== charName) return false;
             if (quote.chatKey) return quote.chatKey === chatInfo.key;
             return quoteMatchesCurrentChat(quote, chatInfo, ctx);
@@ -2691,6 +2698,7 @@ function getArchiveState() {
 
         if (isSaved) {
             savedQuotes = savedQuotes.filter(q => !(
+                isWholeMessageQuote(q) &&
                 String(q.mesid) === String(mesid) &&
                 q.char === charName &&
                 (q.chatKey ? q.chatKey === chatInfo.key : true)
