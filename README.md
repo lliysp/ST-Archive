@@ -38,7 +38,7 @@
 - **拖拽**：悬浮球支持全端拖拽。
 
 ## 界面预览
-测试环境：SillyTarven v1.19.0，主题 Dark Lite，pc端 windows11,手机端 android16
+预览设备：SillyTavern v1.19.0，主题 Dark Lite，pc端 windows11(Edge浏览器),android移动端(Edge浏览器)
 <p align="center">
   <img width="2549" height="1403" alt="image" src="https://github.com/user-attachments/assets/ba2c40c5-37af-4a94-82d9-b4fd65939b84" width="90%" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);" />
   <em>PC端-首页</em>
@@ -78,6 +78,15 @@
 
 ## 叠甲
 本扩展为作者根据个人喜好深度定制的 UI 扩展，代码撰写和测试均在pc端进行，不保证与所有酒馆版本/主题完美兼容，不提供任何技术支持，不定期更新。如果觉得好看并认为项目没有问题，欢迎使用。
+
+## 🧪 兼容性与测试环境
+
+本扩展已在以下环境完成深度兼容性测试，确保在手机与 PC 端都能获得极佳的 UI 体验：
+- **酒馆版本**：SillyTavern v1.19.0
+- **PC测试端**：Windows 11(配合 Edge浏览器)
+- **移动测试端**：Android移动端(配合Edge浏览器)/局域网连接pc端(vivo浏览器)
+- **UI主题适配**：原生亮暗色主题/各种复杂渲染的主题环境(仅限未改变SillyTavern原生UI位置的主题)
+> *注：由于 SillyTavern 前端 DOM 更新频繁，如遇排版冲突或功能失效，欢迎带截图反馈。*
 
 ## 开发者
 - UI/交互设计/前端重构/测试：lliysp
