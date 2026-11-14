@@ -12,6 +12,9 @@ const ARCHIVE_CACHE_KEY = 'st_archive_cache';
 const ARCHIVE_MIGRATION_KEY = 'st_archive_migrated_to_server';
 const ARCHIVE_STATE_VERSION = 2;
 const ARCHIVE_CACHE_LIMIT = 2 * 1024 * 1024;
+const ARCHIVE_DEFAULT_RENDER_LIMIT = 50;
+const ARCHIVE_RENDER_LIMIT_MIN = 1;
+const ARCHIVE_RENDER_LIMIT_MAX = 1000;
 
 // 旧版本使用的 localStorage 键名，仅用于一次性迁移
 const ARCHIVE_LEGACY_KEYS = {
@@ -38,7 +41,14 @@ function createArchiveState() {
         quotes: [],
         pinnedChars: [],
         pinnedChats: {},
+        renderLimit: ARCHIVE_DEFAULT_RENDER_LIMIT,
     };
+}
+
+function clampArchiveRenderLimit(value) {
+    const parsed = Number.parseInt(value, 10);
+    if (!Number.isFinite(parsed)) return ARCHIVE_DEFAULT_RENDER_LIMIT;
+    return Math.min(ARCHIVE_RENDER_LIMIT_MAX, Math.max(ARCHIVE_RENDER_LIMIT_MIN, parsed));
 }
 
 function sanitizePinnedChats(value) {
@@ -62,6 +72,7 @@ function sanitizeArchiveState(raw) {
         ? raw.pinnedChars.filter(item => typeof item === 'string' && item)
         : [];
     state.pinnedChats = sanitizePinnedChats(raw.pinnedChats);
+    state.renderLimit = clampArchiveRenderLimit(raw.renderLimit);
     return state;
 }
 
@@ -96,6 +107,33 @@ function archiveQuoteKey(quote) {
     const textPart = quote.source === 'selection' ? `::${String(quote.text ?? '').slice(0, 160)}` : '';
     if (chatKey) return `chat::${chatKey}::${mesid}::${char}${textPart}`;
     return `legacy::${char}::${mesid}::${String(quote.text ?? '').slice(0, 160)}`;
+}
+
+/**
+ * 把一个 fixed 弹层钉在“当前真正看得见的视口”里。
+ * 手机本地部署 / 内置浏览器 / 软键盘弹出时，100vh、inset:0 可能按更大的布局视口计算，
+ * 会导致弹层比屏幕还高、上半部分被顶到屏幕外。
+ */
+function pinLayerToVisibleViewport(element) {
+    if (!element) return;
+
+    const viewport = window.visualViewport;
+    const width = Math.round((viewport ? viewport.width : window.innerWidth) || 0);
+    let height = Math.round((viewport ? viewport.height : window.innerHeight) || 0);
+    if (width <= 0 || height <= 0) return;
+
+    // 没有 VisualViewport 的旧内核：innerHeight 可能被报成超大的布局视口，用屏幕高度兜底
+    if (!viewport) {
+        const screenHeight = Math.round(Number(window.screen?.height) || 0);
+        if (screenHeight > 0 && height > screenHeight * 1.1) height = screenHeight;
+    }
+
+    element.style.top = `${Math.round(viewport ? viewport.offsetTop : 0)}px`;
+    element.style.left = `${Math.round(viewport ? viewport.offsetLeft : 0)}px`;
+    element.style.right = 'auto';
+    element.style.bottom = 'auto';
+    element.style.width = `${width}px`;
+    element.style.height = `${height}px`;
 }
 
 function readLegacyLocalState() {
@@ -272,6 +310,21 @@ function getArchiveState() {
     return archiveState;
 }
 
+function getArchiveRenderLimit() {
+    return clampArchiveRenderLimit(getArchiveState().renderLimit);
+}
+
+function setArchiveRenderLimit(value) {
+    const nextLimit = clampArchiveRenderLimit(value);
+    const state = getArchiveState();
+
+    if (state.renderLimit === nextLimit) return nextLimit;
+
+    state.renderLimit = nextLimit;
+    persistArchiveState();
+    return nextLimit;
+}
+
 // 🚨 防闪屏的第一道闸：扩展 CSS 由酒馆在 initExtensions 阶段注入，
 // 正常情况下早于欢迎面板首次渲染；这里再同步写一份最小样式到 <head>，
 // 保证即使样式表加载被推迟，原生首页也来不及露脸。
@@ -300,6 +353,121 @@ function getArchiveState() {
             '"': '&quot;',
             "'": '&#39;',
         })[char]);
+    }
+
+    let archiveLimitOverlay = null;
+    let archiveLimitInput = null;
+    let archiveLimitReturnFocus = null;
+
+    // 首页档案馆的界面状态：重命名存档、修改渲染上限等都会导致欢迎面板整块重绘，
+    // 这里把页码 / 搜索词 / 排序 / 展开的角色组 / 滚动位置记在模块里，重建后原样恢复。
+    const archiveUiState = {
+        page: 1,
+        search: '',
+        sort: 'time-desc',
+        openGroups: new Set(),
+        scrollTop: 0,
+    };
+
+    function applyArchiveLimitViewportBounds() {
+        pinLayerToVisibleViewport(archiveLimitOverlay);
+    }
+
+    function refreshArchiveLimitBounds() {
+        if (archiveLimitOverlay && archiveLimitOverlay.classList.contains('show')) {
+            applyArchiveLimitViewportBounds();
+        }
+    }
+
+    function getArchiveLimitDialog() {
+        if (archiveLimitOverlay) return archiveLimitOverlay;
+
+        const overlay = document.createElement('div');
+        overlay.id = 'archive-limit-overlay';
+        overlay.innerHTML = `
+            <div class="archive-limit-panel" role="dialog" aria-modal="true" aria-labelledby="archive-limit-title">
+                <div class="archive-limit-title" id="archive-limit-title">请输入存档渲染上限</div>
+                <input type="number" class="archive-limit-input" min="${ARCHIVE_RENDER_LIMIT_MIN}" max="${ARCHIVE_RENDER_LIMIT_MAX}" step="1" inputmode="numeric" aria-label="存档渲染上限">
+                <button type="button" class="archive-limit-confirm">确认</button>
+            </div>
+        `;
+        document.body.appendChild(overlay);
+
+        const input = overlay.querySelector('.archive-limit-input');
+        const confirmBtn = overlay.querySelector('.archive-limit-confirm');
+
+        function close(restoreFocus = true) {
+            overlay.classList.remove('show');
+            if (restoreFocus && archiveLimitReturnFocus?.isConnected) {
+                archiveLimitReturnFocus.focus({ preventScroll: true });
+            }
+        }
+
+        function confirm() {
+            const nextLimit = clampArchiveRenderLimit(input.value);
+            const changed = nextLimit !== getArchiveRenderLimit();
+
+            if (changed) setArchiveRenderLimit(nextLimit);
+            close(!changed);
+
+            if (!changed) return;
+
+            refreshArchiveAfterLimitChange();
+            requestAnimationFrame(() => {
+                document.querySelector('.archive-limit')?.focus({ preventScroll: true });
+            });
+        }
+
+        overlay.addEventListener('click', (event) => {
+            if (event.target === overlay) close();
+        });
+        confirmBtn.addEventListener('click', confirm);
+        input.addEventListener('keydown', (event) => {
+            if (event.key !== 'Enter') return;
+            event.preventDefault();
+            confirm();
+        });
+        document.addEventListener('keydown', (event) => {
+            if (event.key !== 'Escape' || !overlay.classList.contains('show')) return;
+            event.preventDefault();
+            close();
+        });
+
+        archiveLimitOverlay = overlay;
+        archiveLimitInput = input;
+        return overlay;
+    }
+
+    function openArchiveLimitDialog() {
+        const overlay = getArchiveLimitDialog();
+        archiveLimitReturnFocus = document.activeElement;
+        archiveLimitInput.value = String(getArchiveRenderLimit());
+        overlay.classList.add('show');
+        applyArchiveLimitViewportBounds();
+
+        requestAnimationFrame(() => {
+            archiveLimitInput.focus();
+            archiveLimitInput.select();
+            // 软键盘弹出后可见视口会变矮，再钉一次，避免弹窗上半部分被顶出屏幕
+            applyArchiveLimitViewportBounds();
+        });
+    }
+
+    function refreshArchiveAfterLimitChange() {
+        document.querySelector('.my-folded-wrapper')?.remove();
+
+        const nativeList = document.querySelector('.recentChatList');
+        if (nativeList) nativeList.style.display = 'none';
+
+        renderArchiveList();
+    }
+
+    // 手机软键盘弹出、地址栏伸缩、横竖屏切换时，保持 limit 弹窗留在可见视口内
+    window.addEventListener('resize', refreshArchiveLimitBounds);
+    window.addEventListener('orientationchange', refreshArchiveLimitBounds);
+    if (window.visualViewport && typeof window.visualViewport.addEventListener === 'function') {
+        window.visualViewport.addEventListener('resize', refreshArchiveLimitBounds);
+        window.visualViewport.addEventListener('scroll', refreshArchiveLimitBounds);
     }
 
     function collectCharacterTags() {
@@ -333,12 +501,37 @@ function getArchiveState() {
         return { name, key };
     }
 
+    // 重命名存档会让酒馆重绘欢迎面板，滚动位置也会被重置；只记录“档案馆存在时”的滚动位置，
+    // 重建后恢复。切到聊天页时档案馆已被移除，不会把聊天页的滚动位置误记进来。
+    document.addEventListener('scroll', (event) => {
+        const target = event.target;
+        if (!(target instanceof Element) || target.id !== 'chat') return;
+        if (!document.querySelector('.my-folded-wrapper')) return;
+        archiveUiState.scrollTop = target.scrollTop;
+    }, true);
+
+    function restoreArchiveScrollPosition() {
+        const target = archiveUiState.scrollTop;
+        if (!(target > 0)) return;
+
+        const chat = document.getElementById('chat');
+        if (!chat) return;
+
+        chat.scrollTop = target;
+        requestAnimationFrame(() => {
+            if (Math.abs(chat.scrollTop - target) > 4) chat.scrollTop = target;
+        });
+    }
+
     function renderArchiveList() {
         const nativeList = document.querySelector('.recentChatList');
         if (!nativeList) return;
 
         const items = Array.from(nativeList.querySelectorAll('.recentChat'));
         if (items.length === 0) return;
+
+        const renderLimit = getArchiveRenderLimit();
+        const visibleItems = items.slice(0, renderLimit);
 
         // 已经重构过：只保证原生列表隐藏，避免重复插入
         const existingWrapper = nativeList.parentElement?.querySelector('.my-folded-wrapper');
@@ -352,7 +545,7 @@ function getArchiveState() {
         const grouped = new Map();
 
         // 1. 提取数据（原生列表本身已按时间排序，直接保留顺序）
-        items.forEach((item, order) => {
+        visibleItems.forEach((item, order) => {
             const { name, key } = getGroupInfo(item);
             const dateEl = item.querySelector('.chatDate');
             const dateStr = dateEl ? dateEl.textContent.trim() : '';
@@ -393,6 +586,11 @@ function getArchiveState() {
             });
         });
 
+        // 清理已经不存在的角色组展开状态（例如被搜索条件过滤掉、或角色已删除）
+        [...archiveUiState.openGroups].forEach(key => {
+            if (!grouped.has(key)) archiveUiState.openGroups.delete(key);
+        });
+
         // 2. 构建外层框架
         const wrapper = document.createElement('div');
         wrapper.className = 'my-folded-wrapper';
@@ -417,10 +615,13 @@ function getArchiveState() {
         `;
         wrapper.appendChild(toolbar);
 
-        const timestamp = document.createElement('div');
-        timestamp.className = 'archive-timestamp';
-        timestamp.innerText = `SYSTEM TIME: ${new Date().toLocaleString()} // ACCESS GRANTED`;
-        wrapper.appendChild(timestamp);
+        const limitButton = document.createElement('button');
+        limitButton.type = 'button';
+        limitButton.className = 'archive-limit';
+        limitButton.title = '点击修改存档渲染上限';
+        limitButton.textContent = `Archive Limit: ${getArchiveRenderLimit()}`;
+        limitButton.addEventListener('click', openArchiveLimitDialog);
+        wrapper.appendChild(limitButton);
 
         const listContainer = document.createElement('div');
         wrapper.appendChild(listContainer);
@@ -451,6 +652,7 @@ function getArchiveState() {
             groupDiv.setAttribute('data-tags', data.tags.join(',').toLowerCase());
             groupDiv.setAttribute('data-order', String(data.order));
             groupDiv.setAttribute('data-key', data.key);
+            if (archiveUiState.openGroups.has(data.key)) groupDiv.classList.add('is-open');
 
             const isPinnedChar = pinnedChars.includes(data.key) || pinnedChars.includes(data.name);
             if (isPinnedChar) groupDiv.setAttribute('data-pinned', 'true');
@@ -500,7 +702,9 @@ function getArchiveState() {
             header.addEventListener('click', (e) => {
                 e.preventDefault();
                 e.stopPropagation();
-                groupDiv.classList.toggle('is-open');
+                const isOpen = groupDiv.classList.toggle('is-open');
+                if (isOpen) archiveUiState.openGroups.add(data.key);
+                else archiveUiState.openGroups.delete(data.key);
             });
 
             const contentOuter = document.createElement('div');
@@ -575,7 +779,10 @@ function getArchiveState() {
                     }
                 });
 
-                btns[1].addEventListener('click', (e) => { e.stopPropagation(); if (chat.renameNode) chat.renameNode.click(); });
+                btns[1].addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    if (chat.renameNode) chat.renameNode.click();
+                });
                 btns[2].addEventListener('click', (e) => { e.stopPropagation(); if (chat.deleteNode) chat.deleteNode.click(); });
 
                 contentInner.appendChild(chatItem);
@@ -596,7 +803,14 @@ function getArchiveState() {
         const nextBtn = wrapper.querySelector('.page-next');
         const pageInfo = wrapper.querySelector('.page-info');
 
-        let currentPage = 1;
+        // 重命名存档 / 修改渲染上限会导致首页整块重建：恢复之前停留的页码、搜索词和排序
+        searchInput.value = archiveUiState.search || '';
+        if (archiveUiState.sort
+            && Array.from(sortSelect.options).some(option => option.value === archiveUiState.sort)) {
+            sortSelect.value = archiveUiState.sort;
+        }
+
+        let currentPage = Math.max(1, Number(archiveUiState.page) || 1);
         const pageSize = 10;
 
         function applySortAndFilter(resetPage = false) {
@@ -656,18 +870,32 @@ function getArchiveState() {
 
             prevBtn.disabled = currentPage === 1;
             nextBtn.disabled = currentPage === totalPages;
+
+            // 记住当前界面状态，供下一次重建恢复
+            archiveUiState.page = currentPage;
+            archiveUiState.search = searchInput.value;
+            archiveUiState.sort = sortBy;
         }
 
         searchBtn.addEventListener('click', () => applySortAndFilter(true));
+        searchInput.addEventListener('input', () => { archiveUiState.search = searchInput.value; });
         searchInput.addEventListener('keyup', (e) => { if (e.key === 'Enter') applySortAndFilter(true); });
-        resetBtn.addEventListener('click', () => { searchInput.value = ''; applySortAndFilter(true); });
-        sortSelect.addEventListener('change', () => applySortAndFilter(true));
+        resetBtn.addEventListener('click', () => {
+            searchInput.value = '';
+            archiveUiState.search = '';
+            applySortAndFilter(true);
+        });
+        sortSelect.addEventListener('change', () => {
+            archiveUiState.sort = sortSelect.value;
+            applySortAndFilter(true);
+        });
         prevBtn.addEventListener('click', () => { if (currentPage > 1) { currentPage--; applySortAndFilter(); } });
         nextBtn.addEventListener('click', () => { currentPage++; applySortAndFilter(); });
 
         nativeList.insertAdjacentElement('afterend', wrapper);
         nativeList.style.display = 'none';
-        applySortAndFilter(true);
+        applySortAndFilter(false);
+        restoreArchiveScrollPosition();
     }
 
     // 进入酒馆、关闭聊天、切换角色时，原生的欢迎面板会被整块重新渲染。
@@ -1535,26 +1763,7 @@ function getArchiveState() {
     // 手机本地部署 / 内置浏览器里，100vh、100dvh 有时会按更大的“布局视口”计算，
     // 结果弹窗比屏幕还高、上半部分被顶到屏幕外。这里直接按“当前看得见的视口”钉住弹层。
     function applyDetailViewportBounds() {
-        const viewport = window.visualViewport;
-        const viewportWidth = Math.round((viewport ? viewport.width : window.innerWidth) || 0);
-        let viewportHeight = Math.round((viewport ? viewport.height : window.innerHeight) || 0);
-        if (viewportWidth <= 0 || viewportHeight <= 0) return;
-
-        // 极端回退：没有 VisualViewport 的旧内核里，innerHeight 可能被报成超大的布局视口，
-        // 这时再用屏幕高度兜底，保证弹窗不会高于手机屏幕。
-        if (!viewport) {
-            const screenHeight = Math.round(Number(window.screen?.height) || 0);
-            if (screenHeight > 0 && viewportHeight > screenHeight * 1.1) {
-                viewportHeight = screenHeight;
-            }
-        }
-
-        detailOverlay.style.top = `${Math.round(viewport ? viewport.offsetTop : 0)}px`;
-        detailOverlay.style.left = `${Math.round(viewport ? viewport.offsetLeft : 0)}px`;
-        detailOverlay.style.right = 'auto';
-        detailOverlay.style.bottom = 'auto';
-        detailOverlay.style.width = `${viewportWidth}px`;
-        detailOverlay.style.height = `${viewportHeight}px`;
+        pinLayerToVisibleViewport(detailOverlay);
     }
 
     function refreshQuoteDetailBounds() {
