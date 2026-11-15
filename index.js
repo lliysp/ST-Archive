@@ -343,7 +343,7 @@ function setArchiveRenderLimit(value) {
 })();
 
 (function () {
-    console.log("✨ [ST-档案馆] v1.4.0 检索版已启动！");
+    console.log("✨ [ST-档案馆] v1.5.0 索引版已启动！");
 
     function escapeHtml(value) {
         return String(value ?? '').replace(/[&<>"']/g, char => ({
@@ -1161,7 +1161,7 @@ function setArchiveRenderLimit(value) {
 
 
 (function () {
-    console.log("📚 [ST-档案馆] 拾遗模块已加载（v1.4.0）！");
+    console.log("📚 [ST-档案馆] 拾遗模块已加载（v1.5.0）！");
 
     if (document.getElementById('quote-fab')) return;
 
@@ -4851,6 +4851,523 @@ function setArchiveRenderLimit(value) {
             }
         }, true);
     })(fab);
+
+    // ==================================================
+    // 剧情索引（魔杖菜单）
+    // --------------------------------------------------
+    // 性能要点：
+    //   · 打开时只复制 chat 数组引用，不遍历、不预生成几千个节点；
+    //   · 固定行高 + 虚拟列表，DOM 里始终只有“当前视口 + 少量缓冲”的几十个气泡；
+    //   · 每层楼的 20 字预览也是滚到附近才计算，计算后缓存；
+    //   · 滚动监听用 rAF 合并，不会每个 scroll 事件都重排。
+    // ==================================================
+
+    const PLOT_ROW_HEIGHT = 64;
+    const PLOT_OVERSCAN = 8;
+    const PLOT_PREVIEW_LIMIT = 50;
+
+    const plotIndex = {
+        overlay: null,
+        scroll: null,
+        spacer: null,
+        windowEl: null,
+        empty: null,
+        count: null,
+        closeBtn: null,
+        chat: null,
+        cache: new Map(),
+        lastStart: -1,
+        lastEnd: -1,
+        frame: 0,
+        returnFocus: null,
+    };
+
+    function injectPlotIndexStyle() {
+        if (document.getElementById('plot-index-style')) return;
+
+        const style = document.createElement('style');
+        style.id = 'plot-index-style';
+        style.textContent = `
+            #plot-index-overlay {
+                position: fixed;
+                top: 0; left: 0; right: 0; bottom: 0;
+                width: 100%;
+                height: 100%;
+                height: 100dvh;
+                z-index: 2147483200;
+                display: none;
+                align-items: stretch;
+                justify-content: center;
+                overflow: hidden;
+                background: rgba(0, 0, 0, 0.3);
+                backdrop-filter: blur(3px);
+                -webkit-backdrop-filter: blur(3px);
+                color: var(--SmartThemeBodyColor);
+                font-family: 'Noto Serif SC', 'Songti SC', serif;
+                overscroll-behavior: contain;
+            }
+            #plot-index-overlay.show { display: flex; }
+
+            #plot-index-panel {
+                width: 100%;
+                height: 100%;
+                max-height: 100%;
+                display: flex;
+                flex-direction: column;
+                min-height: 0;
+                overflow: hidden;
+                background: var(--SmartThemeBlurTintColor, #FDFBF7);
+            }
+
+            #plot-index-head {
+                flex: 0 0 auto;
+                width: min(92vw, 920px);
+                margin: 0 auto;
+                padding: 18px 28px 12px;
+                box-sizing: border-box;
+                display: flex; align-items: center; gap: 12px;
+                border-bottom: 1px dashed rgba(164, 80, 80, 0.3);
+                background: rgba(128, 128, 128, 0.08);
+                background: color-mix(in srgb, var(--SmartThemeBodyColor) 5%, transparent);
+            }
+            #plot-index-title {
+                flex: 1; min-width: 0;
+                font-size: 15px; letter-spacing: 4px;
+                color: var(--SmartThemeBodyColor);
+                white-space: nowrap;
+            }
+            #plot-index-count {
+                flex-shrink: 0;
+                font-family: 'Courier New', Courier, monospace;
+                font-size: 10px; letter-spacing: 1px;
+                color: rgba(128, 128, 128, 0.9);
+                color: color-mix(in srgb, var(--SmartThemeBodyColor) 55%, transparent);
+            }
+            #plot-index-close {
+                appearance: none; -webkit-appearance: none;
+                flex-shrink: 0;
+                width: 30px; height: 30px; padding: 0;
+                border: 0; border-radius: 6px;
+                background: transparent;
+                color: #a45050;
+                font-family: Arial, sans-serif;
+                font-size: 22px; line-height: 1;
+                cursor: pointer;
+                transition: color 0.2s, background 0.2s;
+            }
+            #plot-index-close:hover { color: #8b3a3a; background: rgba(164, 80, 80, 0.1); }
+
+            #plot-index-scroll {
+                flex: 1 1 0;
+                min-height: 0;
+                overflow-y: auto;
+                overscroll-behavior: contain;
+                -webkit-overflow-scrolling: touch;
+                padding: 8px 0 40px;
+            }
+            #plot-index-spacer {
+                position: relative;
+                width: min(92vw, 920px);
+                margin: 0 auto;
+            }
+            #plot-index-window {
+                position: absolute; left: 0; right: 0; top: 0;
+            }
+
+            .plot-index-item {
+                position: absolute; left: 0; right: 0;
+                height: 64px;
+                display: flex; align-items: center;
+                padding: 4px 10px;
+                box-sizing: border-box;
+            }
+            .plot-index-item.is-user { justify-content: flex-end; }
+
+            .plot-index-bubble-wrap {
+                display: flex;
+                align-items: flex-end;
+                gap: 6px;
+                max-width: 78%;
+                min-width: 0;
+            }
+
+            .plot-index-bubble {
+                position: relative;
+                max-width: 100%;
+                min-width: 0;
+                margin: 0;
+                padding: 8px 12px;
+                border: 0;
+                border-left: 2px solid #a45050;
+                border-radius: 6px;
+                background: rgba(164, 80, 80, 0.1);
+                background: color-mix(in srgb, var(--SmartThemeBodyColor) 5%, transparent);
+                color: var(--SmartThemeBodyColor);
+                box-shadow: 0 2px 8px rgba(0, 0, 0, 0.03);
+                font-family: inherit;
+                font-size: 13px;
+                line-height: 1.4;
+                text-align: left;
+                cursor: pointer;
+                overflow: hidden;
+                transition: background 0.2s, box-shadow 0.2s;
+            }
+            .plot-index-text {
+                display: -webkit-box;
+                -webkit-line-clamp: 2;
+                -webkit-box-orient: vertical;
+                overflow: hidden;
+                overflow-wrap: anywhere;
+            }
+            .plot-index-floor {
+                flex: 0 0 auto;
+                align-self: flex-end;
+                margin: 0 0 1px;
+                font-family: 'Courier New', Courier, monospace;
+                font-size: 9px;
+                letter-spacing: 0.5px;
+                line-height: 1;
+                color: rgba(128, 128, 128, 0.9);
+                color: color-mix(in srgb, var(--SmartThemeBodyColor) 45%, transparent);
+                pointer-events: none;
+            }
+            .plot-index-item.is-user .plot-index-floor {
+                margin: 0 0 1px;
+            }
+            .plot-index-item.is-user .plot-index-bubble {
+                border-left-color: #5f87a6;
+                background: rgba(95, 135, 166, 0.12);
+                background: color-mix(in srgb, var(--SmartThemeBodyColor) 8%, transparent);
+            }
+            .plot-index-bubble:hover {
+                background: rgba(164, 80, 80, 0.16);
+                background: color-mix(in srgb, var(--SmartThemeBodyColor) 10%, transparent);
+                box-shadow: 0 4px 12px rgba(0, 0, 0, 0.06);
+            }
+            .plot-index-item.is-user .plot-index-bubble:hover {
+                background: rgba(95, 135, 166, 0.18);
+                background: color-mix(in srgb, var(--SmartThemeBodyColor) 12%, transparent);
+            }
+            .plot-index-item.is-system .plot-index-bubble { font-style: italic; opacity: 0.82; }
+
+            .plot-index-empty {
+                margin: auto;
+                padding: 0 20px 10vh;
+                text-align: center;
+                font-size: 13px; line-height: 1.9;
+                color: rgba(128, 128, 128, 0.9);
+                color: color-mix(in srgb, var(--SmartThemeBodyColor) 60%, transparent);
+                letter-spacing: 1px;
+            }
+
+            @media (max-width: 560px) {
+                #plot-index-head { width: 94vw; padding: 14px 18px 10px; gap: 8px; }
+                #plot-index-title { font-size: 13px; letter-spacing: 2px; }
+                #plot-index-count { font-size: 9px; }
+                #plot-index-spacer { width: 94vw; }
+                .plot-index-item { padding: 4px 4px; }
+                .plot-index-bubble-wrap { max-width: 86%; }
+                .plot-index-bubble { font-size: 12px; padding: 7px 10px; }
+            }
+
+            body.plot-index-open { overflow: hidden !important; }
+        `;
+        document.head.appendChild(style);
+    }
+
+    function ensurePlotIndexLayer() {
+        if (plotIndex.overlay) return plotIndex.overlay;
+
+        injectPlotIndexStyle();
+
+        const overlay = document.createElement('div');
+        overlay.id = 'plot-index-overlay';
+        overlay.setAttribute('role', 'dialog');
+        overlay.setAttribute('aria-modal', 'true');
+        overlay.setAttribute('aria-label', '剧情索引');
+        overlay.innerHTML = `
+            <div id="plot-index-panel">
+                <div id="plot-index-head">
+                    <div id="plot-index-title">剧 情 索 引</div>
+                    <div id="plot-index-count"></div>
+                    <button type="button" id="plot-index-close" title="关闭" aria-label="关闭">&times;</button>
+                </div>
+                <div id="plot-index-scroll">
+                    <div id="plot-index-spacer">
+                        <div id="plot-index-window"></div>
+                    </div>
+                </div>
+                <div class="plot-index-empty" id="plot-index-empty" hidden>当前聊天还没有可索引的楼层。</div>
+            </div>
+        `;
+        document.body.appendChild(overlay);
+
+        plotIndex.overlay = overlay;
+        plotIndex.scroll = overlay.querySelector('#plot-index-scroll');
+        plotIndex.spacer = overlay.querySelector('#plot-index-spacer');
+        plotIndex.windowEl = overlay.querySelector('#plot-index-window');
+        plotIndex.empty = overlay.querySelector('#plot-index-empty');
+        plotIndex.count = overlay.querySelector('#plot-index-count');
+        plotIndex.closeBtn = overlay.querySelector('#plot-index-close');
+
+        plotIndex.closeBtn.addEventListener('click', closePlotIndex);
+
+        plotIndex.scroll.addEventListener('scroll', () => {
+            if (plotIndex.frame) return;
+            plotIndex.frame = requestAnimationFrame(() => {
+                plotIndex.frame = 0;
+                renderPlotWindow();
+            });
+        }, { passive: true });
+
+        plotIndex.scroll.addEventListener('click', (event) => {
+            const bubble = event.target.closest?.('.plot-index-bubble');
+            if (!bubble) return;
+
+            const row = bubble.closest('.plot-index-item');
+            const index = Number(row?.dataset.index);
+            if (Number.isInteger(index)) jumpToPlotFloor(index);
+        });
+
+        window.addEventListener('resize', () => {
+            if (overlay.classList.contains('show')) renderPlotWindow(true);
+        });
+        if (window.visualViewport && typeof window.visualViewport.addEventListener === 'function') {
+            window.visualViewport.addEventListener('resize', () => {
+                if (overlay.classList.contains('show')) renderPlotWindow(true);
+            });
+        }
+
+        document.addEventListener('keydown', (event) => {
+            if (event.key !== 'Escape' || !overlay.classList.contains('show')) return;
+            event.preventDefault();
+            closePlotIndex();
+        });
+
+        return overlay;
+    }
+
+    function stripPlotPreview(value) {
+        let text = String(value ?? '')
+            .replace(/<br\s*\/?>/gi, ' ')
+            .replace(/<[^>]*>/g, ' ')
+            .replace(/&nbsp;/gi, ' ')
+            .replace(/&amp;/gi, '&')
+            .replace(/&lt;/gi, '<')
+            .replace(/&gt;/gi, '>')
+            .replace(/&quot;/gi, '"')
+            .replace(/&#0*39;/gi, "'")
+            .replace(/\s+/g, ' ')
+            .trim();
+
+        if (!text) return '（空楼层）';
+
+        const chars = Array.from(text);
+        if (chars.length <= PLOT_PREVIEW_LIMIT) return text;
+        return `${chars.slice(0, PLOT_PREVIEW_LIMIT).join('')}…`;
+    }
+
+    function getPlotPreview(index) {
+        let item = plotIndex.cache.get(index);
+        if (item) return item;
+
+        const message = plotIndex.chat?.[index] || {};
+        item = {
+            text: stripPlotPreview(message.mes),
+            isUser: Boolean(message.is_user),
+            isSystem: Boolean(message.is_system) && !message.is_user,
+        };
+        plotIndex.cache.set(index, item);
+        return item;
+    }
+
+    function renderPlotWindow(force = false) {
+        const state = plotIndex;
+        if (!state.chat || !state.scroll) return;
+
+        const total = state.chat.length;
+        const viewport = state.scroll.clientHeight || window.innerHeight;
+        const top = state.scroll.scrollTop;
+
+        const start = Math.max(0, Math.floor(top / PLOT_ROW_HEIGHT) - PLOT_OVERSCAN);
+        const end = Math.min(
+            total,
+            Math.ceil((top + viewport) / PLOT_ROW_HEIGHT) + PLOT_OVERSCAN
+        );
+
+        if (!force && start === state.lastStart && end === state.lastEnd) return;
+
+        state.lastStart = start;
+        state.lastEnd = end;
+
+        const windowEl = state.windowEl;
+        windowEl.style.transform = `translateY(${start * PLOT_ROW_HEIGHT}px)`;
+        windowEl.style.height = `${Math.max(0, end - start) * PLOT_ROW_HEIGHT}px`;
+
+        const fragment = document.createDocumentFragment();
+
+        for (let index = start; index < end; index++) {
+            const data = getPlotPreview(index);
+
+            const row = document.createElement('div');
+            row.className = 'plot-index-item'
+                + (data.isUser ? ' is-user' : '')
+                + (data.isSystem ? ' is-system' : '');
+            row.style.top = `${(index - start) * PLOT_ROW_HEIGHT}px`;
+            row.dataset.index = String(index);
+
+            const bubble = document.createElement('button');
+            bubble.type = 'button';
+            bubble.className = 'plot-index-bubble';
+            bubble.title = `第 ${index} 楼`;
+            bubble.setAttribute('aria-label', `跳转到第 ${index} 楼`);
+
+            const text = document.createElement('span');
+            text.className = 'plot-index-text';
+            text.textContent = data.text;
+
+            const floor = document.createElement('span');
+            floor.className = 'plot-index-floor';
+            floor.textContent = `#${index}`;
+
+            bubble.appendChild(text);
+
+            const wrap = document.createElement('div');
+            wrap.className = 'plot-index-bubble-wrap';
+
+            // 楼层号放气泡外面，并和气泡底边对齐：Char 在右，User 在左
+            if (data.isUser) {
+                wrap.appendChild(floor);
+                wrap.appendChild(bubble);
+            } else {
+                wrap.appendChild(bubble);
+                wrap.appendChild(floor);
+            }
+            row.appendChild(wrap);
+
+            fragment.appendChild(row);
+        }
+
+        windowEl.replaceChildren(fragment);
+    }
+
+    function openPlotIndex() {
+        const ctx = getChatContext();
+        const chat = Array.isArray(ctx?.chat) ? ctx.chat.slice() : [];
+
+        ensurePlotIndexLayer();
+
+        plotIndex.chat = chat;
+        plotIndex.cache.clear();
+        plotIndex.lastStart = -1;
+        plotIndex.lastEnd = -1;
+        plotIndex.returnFocus = document.activeElement;
+
+        plotIndex.count.textContent = `${chat.length} 层`;
+        plotIndex.spacer.style.height = `${chat.length * PLOT_ROW_HEIGHT}px`;
+        plotIndex.scroll.scrollTop = 0;
+
+        const isEmpty = chat.length === 0;
+        plotIndex.empty.hidden = !isEmpty;
+        plotIndex.scroll.style.display = isEmpty ? 'none' : '';
+
+        plotIndex.overlay.classList.add('show');
+        document.body.classList.add('plot-index-open');
+
+        requestAnimationFrame(() => {
+            renderPlotWindow(true);
+            try { plotIndex.closeBtn?.focus({ preventScroll: true }); } catch (error) { /* 忽略 */ }
+        });
+
+        // 手机地址栏/软键盘会让首次布局晚一点，再补一次，保证列表一定按最终高度铺开
+        setTimeout(() => {
+            if (plotIndex.overlay?.classList.contains('show')) renderPlotWindow(true);
+        }, 120);
+    }
+
+    function closePlotIndex() {
+        const state = plotIndex;
+        if (!state.overlay) return;
+
+        state.overlay.classList.remove('show');
+        document.body.classList.remove('plot-index-open');
+
+        if (state.frame) {
+            cancelAnimationFrame(state.frame);
+            state.frame = 0;
+        }
+
+        state.chat = null;
+        state.cache.clear();
+        state.lastStart = -1;
+        state.lastEnd = -1;
+        state.windowEl?.replaceChildren();
+        if (state.spacer) state.spacer.style.height = '0px';
+
+        const focus = state.returnFocus;
+        state.returnFocus = null;
+        if (focus?.isConnected) {
+            try { focus.focus({ preventScroll: true }); } catch (error) { /* 忽略 */ }
+        }
+    }
+
+    function jumpToPlotFloor(index) {
+        closePlotIndex();
+
+        const target = document.querySelector(`#chat .mes[mesid="${index}"]`);
+        if (!target) {
+            showArchiveToast('info', '这一楼还没有加载出来');
+            return;
+        }
+
+        setTimeout(() => {
+            target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            target.classList.remove('highlight-mes');
+            void target.offsetWidth;
+            target.classList.add('highlight-mes');
+            setTimeout(() => target.classList.remove('highlight-mes'), 2000);
+        }, 100);
+    }
+
+    function installPlotIndexWandButton() {
+        if (document.getElementById('plot-index-wand-button')) return true;
+
+        const menu = document.getElementById('extensionsMenu');
+        if (!menu) return false;
+
+        const button = document.createElement('div');
+        button.id = 'plot-index-wand-button';
+        button.className = 'list-group-item flex-container flexGap5';
+        button.title = '剧情索引';
+
+        const icon = document.createElement('div');
+        icon.className = 'fa-solid fa-list-ol extensionsMenuExtensionButton';
+
+        const label = document.createElement('span');
+        label.textContent = '剧情索引';
+
+        button.appendChild(icon);
+        button.appendChild(label);
+        button.addEventListener('click', openPlotIndex);
+        menu.appendChild(button);
+
+        return true;
+    }
+
+    function initPlotIndex() {
+        injectPlotIndexStyle();
+
+        if (installPlotIndexWandButton()) return;
+
+        // 扩展加载时魔杖菜单可能还没注入，等它出现后补按钮
+        const observer = new MutationObserver(() => {
+            if (installPlotIndexWandButton()) observer.disconnect();
+        });
+        observer.observe(document.body, { childList: true, subtree: true });
+        setTimeout(() => observer.disconnect(), 15000);
+    }
+
+    initPlotIndex();
 
     // 7. 启动同步引擎：事件驱动 + 只处理可见消息，不再有每秒全量扫描
     startQuoteRuntime();
