@@ -343,7 +343,7 @@ function setArchiveRenderLimit(value) {
 })();
 
 (function () {
-    console.log("✨ [ST-档案馆] 终极组内置顶版已启动！");
+    console.log("✨ [ST-档案馆] v1.3.0 性能版已启动！");
 
     function escapeHtml(value) {
         return String(value ?? '').replace(/[&<>"']/g, char => ({
@@ -366,6 +366,8 @@ function setArchiveRenderLimit(value) {
         search: '',
         sort: 'time-desc',
         openGroups: new Set(),
+        pinnedCharKeys: new Set(),
+        pinnedCharNames: new Set(),
         scrollTop: 0,
     };
 
@@ -506,9 +508,10 @@ function setArchiveRenderLimit(value) {
     document.addEventListener('scroll', (event) => {
         const target = event.target;
         if (!(target instanceof Element) || target.id !== 'chat') return;
-        if (!document.querySelector('.my-folded-wrapper')) return;
+        // 只读一个缓存布尔值：滚动时不再每个事件都查一次 DOM
+        if (!archiveView.wrapper?.isConnected) return;
         archiveUiState.scrollTop = target.scrollTop;
-    }, true);
+    }, { capture: true, passive: true });
 
     function restoreArchiveScrollPosition() {
         const target = archiveUiState.scrollTop;
@@ -523,29 +526,53 @@ function setArchiveRenderLimit(value) {
         });
     }
 
-    function renderArchiveList() {
-        const nativeList = document.querySelector('.recentChatList');
-        if (!nativeList) return;
+    // ==================================================
+    // 首页档案馆：数据驱动 + 分页 + 分组懒渲染
+    // --------------------------------------------------
+    // 旧实现每次翻页 / 搜索 / 排序，都会把所有角色组重新排序、重新挂到 DOM 上；
+    // 每个角色组里的聊天行，不管这一页看不看，也会一次性全部建出来。
+    // 现在：原生列表只读一次变成纯数据 → DOM 只建“当前页”的 10 个组；
+    // 组里的聊天行等展开时再按 80 条一批补。存 500 条还是 5000 条，首屏都只处理 10 个组。
+    // ==================================================
 
-        const items = Array.from(nativeList.querySelectorAll('.recentChat'));
-        if (items.length === 0) return;
+    const ARCHIVE_PAGE_SIZE = 10;
+    const ARCHIVE_ROWS_PER_CHUNK = 80;
 
+    const archiveView = {
+        wrapper: null,
+        nativeList: null,
+        listContainer: null,
+        searchInput: null,
+        sortSelect: null,
+        pageInfo: null,
+        prevBtn: null,
+        nextBtn: null,
+        pagination: null,
+        groups: [],
+        groupByKey: new Map(),
+        chatsByOrder: new Map(),
+        observers: [],
+    };
+
+    function computeNativeSignature(nativeList) {
+        if (!nativeList) return '';
+        const first = nativeList.firstElementChild?.getAttribute('data-file') || '';
+        const last = nativeList.lastElementChild?.getAttribute('data-file') || '';
+        return `${nativeList.childElementCount}|${first}|${last}|${getArchiveRenderLimit()}`;
+    }
+
+    // 原生列表的节点只在这一步读一次：把 DOM 信息拍平成纯数据。
+    // 之后翻页、搜索、排序都只动数据，不再反复读 DOM / 挪 DOM。
+    function collectArchiveGroups(nativeList) {
         const renderLimit = getArchiveRenderLimit();
-        const visibleItems = items.slice(0, renderLimit);
-
-        // 已经重构过：只保证原生列表隐藏，避免重复插入
-        const existingWrapper = nativeList.parentElement?.querySelector('.my-folded-wrapper');
-        if (existingWrapper) {
-            if (nativeList.style.display !== 'none') nativeList.style.display = 'none';
-            return;
-        }
-
+        const items = Array.from(nativeList.querySelectorAll('.recentChat')).slice(0, renderLimit);
         const domTags = collectCharacterTags();
         const pinnedChats = getArchiveState().pinnedChats;
-        const grouped = new Map();
+        const groups = new Map();
+        const groupByKey = new Map();
+        const chatsByOrder = new Map();
 
-        // 1. 提取数据（原生列表本身已按时间排序，直接保留顺序）
-        visibleItems.forEach((item, order) => {
+        items.forEach((item, order) => {
             const { name, key } = getGroupInfo(item);
             const dateEl = item.querySelector('.chatDate');
             const dateStr = dateEl ? dateEl.textContent.trim() : '';
@@ -561,17 +588,20 @@ function setArchiveRenderLimit(value) {
             const pinKey = `${key}::${fileKey}`;
             const isPinned = pinnedChats[pinKey] === true || pinnedChats[fileKey] === true;
 
-            if (!grouped.has(key)) {
-                grouped.set(key, {
+            let group = groups.get(key);
+            if (!group) {
+                group = {
                     key,
                     name,
                     tags: domTags[name] || [],
                     chats: [],
                     order,
-                });
+                };
+                groups.set(key, group);
+                groupByKey.set(key, group);
             }
 
-            grouped.get(key).chats.push({
+            const chat = {
                 pinKey,
                 fileKey,
                 title: chatTitle,
@@ -583,15 +613,329 @@ function setArchiveRenderLimit(value) {
                 originalNode: item,
                 isPinned,
                 order,
-            });
+            };
+
+            group.chats.push(chat);
+            chatsByOrder.set(order, chat);
         });
 
-        // 清理已经不存在的角色组展开状态（例如被搜索条件过滤掉、或角色已删除）
+        // 置顶行永远排在组内最前，其余保持原生时间顺序
+        groups.forEach(group => group.chats.sort(compareArchiveChats));
+
+        // 清理已经不存在的角色组展开状态（角色被删、或数据刷新后消失）
         [...archiveUiState.openGroups].forEach(key => {
-            if (!grouped.has(key)) archiveUiState.openGroups.delete(key);
+            if (!groups.has(key)) archiveUiState.openGroups.delete(key);
         });
 
-        // 2. 构建外层框架
+        return { groups: [...groups.values()], groupByKey, chatsByOrder };
+    }
+
+    function compareArchiveChats(a, b) {
+        if (a.isPinned && !b.isPinned) return -1;
+        if (!a.isPinned && b.isPinned) return 1;
+        return a.order - b.order;
+    }
+
+    function buildArchiveHeaderHtml(group) {
+        const isPinnedChar = archiveUiState.pinnedCharKeys.has(group.key)
+            || archiveUiState.pinnedCharNames.has(group.name);
+        const tagsHtml = group.tags
+            .map(tag => `<span class="my-tag">${escapeHtml(tag)}</span>`)
+            .join('');
+
+        return `
+            <div class="my-fold-header">
+                <div class="my-fold-header-left">
+                    <div class="my-name-row">
+                        <span class="icon">❖</span>
+                        <span class="my-header-name">${escapeHtml(group.name)}</span>
+                    </div>
+                    <div class="my-header-tags">${tagsHtml}</div>
+                </div>
+                <div class="my-fold-header-right">
+                    <span class="archive-count">${group.chats.length} 个存档</span>
+                    <i class="fa-solid fa-star my-pin-btn ${isPinnedChar ? 'pinned' : ''}" title="置顶角色"></i>
+                </div>
+            </div>
+        `;
+    }
+
+    function buildArchiveChatRowHtml(chat) {
+        return `
+            <div class="recentChat archive-chat-row ${chat.isPinned ? 'is-pinned-row' : ''}"
+                 data-order="${chat.order}" data-pinned="${chat.isPinned ? 'true' : 'false'}">
+                <img class="archive-avatar" src="${escapeHtml(chat.avatar)}" alt="" width="40" height="40" loading="lazy" decoding="async">
+                <div class="archive-chat-main">
+                    <div class="archive-chat-top">
+                        <span class="archive-chat-title">${escapeHtml(chat.title)}</span>
+                        <div class="archive-chat-actions">
+                            <i class="fa-solid fa-thumbtack chat-pin-btn ${chat.isPinned ? 'pinned' : ''}" data-action="pin" title="置顶"></i>
+                            <i class="fa-solid fa-pen-to-square" data-action="rename" title="编辑"></i>
+                            <i class="fa-solid fa-trash" data-action="delete" title="删除"></i>
+                        </div>
+                    </div>
+                    <div class="archive-chat-bottom">
+                        <span class="archive-chat-date">${escapeHtml(chat.date)}</span>
+                        <div class="archive-chat-stats">${chat.statsHtml}</div>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    /**
+     * 只在元素快被滚动到时才继续放下一批。
+     * 这就是“往下滑也不卡”的关键：浏览器不需要为屏幕外的东西提前排版。
+     */
+    function observeArchiveReveal(element, callback) {
+        let revealed = false;
+        let observer = null;
+
+        const reveal = () => {
+            if (revealed) return;
+            revealed = true;
+            if (observer) {
+                try { observer.disconnect(); } catch (error) { /* 忽略 */ }
+                archiveView.observers = archiveView.observers.filter(item => item !== observer);
+            }
+            element.remove();
+            callback();
+        };
+
+        // 除了自动加载，也给用户一个“点一下也能加载”的兜底
+        element.addEventListener('click', reveal);
+
+        if (typeof IntersectionObserver !== 'function') {
+            reveal();
+            return;
+        }
+
+        const root = document.getElementById('chat');
+        observer = new IntersectionObserver(entries => {
+            if (!entries.some(entry => entry.isIntersecting)) return;
+            reveal();
+        }, { root: root || null, rootMargin: '700px 0px' });
+
+        observer.observe(element);
+        archiveView.observers.push(observer);
+    }
+
+    function disconnectArchiveObservers() {
+        archiveView.observers.forEach(observer => {
+            try { observer.disconnect(); } catch (error) { /* 忽略 */ }
+        });
+        archiveView.observers = [];
+    }
+
+    function appendArchiveChatRows(container, group, start) {
+        const end = Math.min(group.chats.length, start + ARCHIVE_ROWS_PER_CHUNK);
+        if (end <= start) return;
+
+        const holder = document.createElement('div');
+        holder.innerHTML = group.chats.slice(start, end).map(buildArchiveChatRowHtml).join('');
+
+        const fragment = document.createDocumentFragment();
+        while (holder.firstChild) fragment.appendChild(holder.firstChild);
+        container.appendChild(fragment);
+
+        if (end < group.chats.length) {
+            const more = document.createElement('button');
+            more.type = 'button';
+            more.className = 'archive-load-more';
+            more.textContent = '载入更多 ···';
+            container.appendChild(more);
+            observeArchiveReveal(more, () => appendArchiveChatRows(container, group, end));
+        }
+    }
+
+    function createArchiveGroupElement(group) {
+        const groupDiv = document.createElement('div');
+        groupDiv.className = 'my-fold-group';
+        if (archiveUiState.openGroups.has(group.key)) groupDiv.classList.add('is-open');
+        groupDiv.dataset.key = group.key;
+        groupDiv.dataset.name = group.name.toLowerCase();
+        groupDiv.dataset.tags = group.tags.join(',').toLowerCase();
+        groupDiv.dataset.order = String(group.order);
+        groupDiv.innerHTML = buildArchiveHeaderHtml(group);
+
+        const content = document.createElement('div');
+        content.className = 'my-fold-content';
+        const inner = document.createElement('div');
+        inner.className = 'my-fold-content-inner';
+        content.appendChild(inner);
+        groupDiv.appendChild(content);
+
+        // 默认收起的组不建任何聊天行；展开时才建第一批。
+        if (groupDiv.classList.contains('is-open')) {
+            inner.dataset.built = '1';
+            appendArchiveChatRows(inner, group, 0);
+        }
+
+        return groupDiv;
+    }
+
+    function renderArchivePage() {
+        const container = archiveView.listContainer;
+        if (!container) return;
+
+        disconnectArchiveObservers();
+        container.replaceChildren();
+
+        const keyword = String(archiveUiState.search || '').toLowerCase().trim();
+        const sortBy = archiveUiState.sort || 'time-desc';
+
+        const filtered = archiveView.groups.filter(group => {
+            if (!keyword) return true;
+            if (group.name.toLowerCase().includes(keyword)) return true;
+            return group.tags.some(tag => String(tag).toLowerCase().includes(keyword));
+        });
+
+        filtered.sort((a, b) => {
+            const pinnedA = archiveUiState.pinnedCharKeys.has(a.key) || archiveUiState.pinnedCharNames.has(a.name) ? 1 : 0;
+            const pinnedB = archiveUiState.pinnedCharKeys.has(b.key) || archiveUiState.pinnedCharNames.has(b.name) ? 1 : 0;
+            if (pinnedA !== pinnedB) return pinnedB - pinnedA;
+
+            if (sortBy === 'time-asc') return b.order - a.order;
+            if (sortBy === 'name-asc') return a.name.localeCompare(b.name);
+            if (sortBy === 'name-desc') return b.name.localeCompare(a.name);
+            return a.order - b.order; // time-desc
+        });
+
+        const totalPages = Math.max(1, Math.ceil(filtered.length / ARCHIVE_PAGE_SIZE));
+        const page = Math.min(Math.max(1, Number(archiveUiState.page) || 1), totalPages);
+        archiveUiState.page = page;
+
+        const startIndex = (page - 1) * ARCHIVE_PAGE_SIZE;
+        const pageGroups = filtered.slice(startIndex, startIndex + ARCHIVE_PAGE_SIZE);
+
+        const fragment = document.createDocumentFragment();
+        pageGroups.forEach(group => fragment.appendChild(createArchiveGroupElement(group)));
+        container.appendChild(fragment);
+
+        if (archiveView.pageInfo) archiveView.pageInfo.innerText = `${page} / ${totalPages}`;
+        if (archiveView.pagination) archiveView.pagination.style.display = 'flex';
+
+        if (archiveView.prevBtn && archiveView.nextBtn) {
+            const singlePage = totalPages <= 1;
+            archiveView.prevBtn.style.visibility = singlePage ? 'hidden' : 'visible';
+            archiveView.nextBtn.style.visibility = singlePage ? 'hidden' : 'visible';
+            archiveView.prevBtn.disabled = page === 1;
+            archiveView.nextBtn.disabled = page === totalPages;
+        }
+
+        // 记住当前界面状态，供下一次重建恢复
+        archiveUiState.page = page;
+    }
+
+    function refreshPinnedCharSets() {
+        const pinned = getArchiveState().pinnedChars;
+        archiveUiState.pinnedCharKeys = new Set(pinned);
+        archiveUiState.pinnedCharNames = new Set(pinned);
+    }
+
+    function toggleArchiveCharPin(group) {
+        const state = getArchiveState();
+        const currentlyPinned = state.pinnedChars.includes(group.key)
+            || state.pinnedChars.includes(group.name);
+
+        if (currentlyPinned) {
+            state.pinnedChars = state.pinnedChars.filter(item => item !== group.key && item !== group.name);
+        } else {
+            state.pinnedChars = [...state.pinnedChars, group.key];
+        }
+
+        persistArchiveState();
+        refreshPinnedCharSets();
+        // 置顶会让排序变化，回到第一页才能立刻看到刚置顶的角色（和旧版一致）
+        archiveUiState.page = 1;
+        renderArchivePage();
+    }
+
+    function toggleArchiveChatPin(chat, group) {
+        const pins = getArchiveState().pinnedChats;
+        const currentlyPinned = pins[chat.pinKey] === true || pins[chat.fileKey] === true;
+
+        if (currentlyPinned) {
+            delete pins[chat.pinKey];
+            delete pins[chat.fileKey];
+        } else {
+            pins[chat.pinKey] = true;
+            delete pins[chat.fileKey];
+        }
+
+        chat.isPinned = !currentlyPinned;
+        if (group) group.chats.sort(compareArchiveChats);
+
+        persistArchiveState();
+        renderArchivePage();
+    }
+
+    function handleArchiveListClick(event) {
+        const pinChar = event.target.closest('.my-pin-btn');
+        if (pinChar) {
+            event.preventDefault();
+            event.stopPropagation();
+            const groupEl = pinChar.closest('.my-fold-group');
+            const group = archiveView.groupByKey.get(groupEl?.dataset.key);
+            if (group) toggleArchiveCharPin(group);
+            return;
+        }
+
+        const header = event.target.closest('.my-fold-header');
+        if (header) {
+            event.preventDefault();
+            event.stopPropagation();
+            const groupEl = header.closest('.my-fold-group');
+            const key = groupEl?.dataset.key;
+            if (!groupEl || !key) return;
+
+            const isOpen = groupEl.classList.toggle('is-open');
+            if (isOpen) {
+                archiveUiState.openGroups.add(key);
+                const inner = groupEl.querySelector('.my-fold-content-inner');
+                if (inner && !inner.dataset.built) {
+                    const group = archiveView.groupByKey.get(key);
+                    inner.dataset.built = '1';
+                    if (group) appendArchiveChatRows(inner, group, 0);
+                }
+            } else {
+                archiveUiState.openGroups.delete(key);
+            }
+            return;
+        }
+
+        const row = event.target.closest('.archive-chat-row');
+        if (!row) return;
+
+        const order = Number(row.dataset.order);
+        const chat = archiveView.chatsByOrder.get(order);
+        if (!chat) return;
+
+        const action = event.target.closest('[data-action]')?.dataset.action;
+        if (action === 'pin') {
+            event.preventDefault();
+            event.stopPropagation();
+            const group = archiveView.groupByKey.get(row.closest('.my-fold-group')?.dataset.key);
+            toggleArchiveChatPin(chat, group);
+            return;
+        }
+        if (action === 'rename') {
+            event.preventDefault();
+            event.stopPropagation();
+            chat.renameNode?.click();
+            return;
+        }
+        if (action === 'delete') {
+            event.preventDefault();
+            event.stopPropagation();
+            chat.deleteNode?.click();
+            return;
+        }
+
+        chat.originalNode?.click();
+    }
+
+    function createArchiveSkeleton() {
         const wrapper = document.createElement('div');
         wrapper.className = 'my-folded-wrapper';
         wrapper.style.padding = '0 12px';
@@ -635,166 +979,6 @@ function setArchiveRenderLimit(value) {
         `;
         wrapper.appendChild(pagination);
 
-        // 3. 渲染角色组
-        const pinnedChars = getArchiveState().pinnedChars;
-
-        grouped.forEach(data => {
-            // 置顶记录排在组内最前，其余保持原生时间顺序
-            data.chats.sort((a, b) => {
-                if (a.isPinned && !b.isPinned) return -1;
-                if (!a.isPinned && b.isPinned) return 1;
-                return a.order - b.order;
-            });
-
-            const groupDiv = document.createElement('div');
-            groupDiv.className = 'my-fold-group';
-            groupDiv.setAttribute('data-name', data.name.toLowerCase());
-            groupDiv.setAttribute('data-tags', data.tags.join(',').toLowerCase());
-            groupDiv.setAttribute('data-order', String(data.order));
-            groupDiv.setAttribute('data-key', data.key);
-            if (archiveUiState.openGroups.has(data.key)) groupDiv.classList.add('is-open');
-
-            const isPinnedChar = pinnedChars.includes(data.key) || pinnedChars.includes(data.name);
-            if (isPinnedChar) groupDiv.setAttribute('data-pinned', 'true');
-
-            const tagsHtml = data.tags
-                .map(tag => `<span class="my-tag">${escapeHtml(tag)}</span>`)
-                .join('');
-
-            const header = document.createElement('div');
-            header.className = 'my-fold-header';
-            header.innerHTML = `
-                <div class="my-fold-header-left">
-                    <div class="my-name-row">
-                        <span class="icon">❖</span>
-                        <span class="my-header-name">${escapeHtml(data.name)}</span>
-                    </div>
-                    <div class="my-header-tags">${tagsHtml}</div>
-                </div>
-                <div class="my-fold-header-right">
-                    <span class="archive-count">${data.chats.length} 个存档</span>
-                    <i class="fa-solid fa-star my-pin-btn ${isPinnedChar ? 'pinned' : ''}" title="置顶角色"></i>
-                </div>
-            `;
-
-            const pinBtn = header.querySelector('.my-pin-btn');
-            pinBtn.addEventListener('click', (e) => {
-                e.stopPropagation();
-
-                const state = getArchiveState();
-                const currentlyPinned = state.pinnedChars.includes(data.key)
-                    || state.pinnedChars.includes(data.name);
-
-                if (currentlyPinned) {
-                    state.pinnedChars = state.pinnedChars.filter(p => p !== data.key && p !== data.name);
-                    pinBtn.classList.remove('pinned');
-                    groupDiv.removeAttribute('data-pinned');
-                } else {
-                    state.pinnedChars = [...state.pinnedChars, data.key];
-                    pinBtn.classList.add('pinned');
-                    groupDiv.setAttribute('data-pinned', 'true');
-                }
-
-                persistArchiveState();
-                applySortAndFilter(true);
-            });
-
-            header.addEventListener('click', (e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                const isOpen = groupDiv.classList.toggle('is-open');
-                if (isOpen) archiveUiState.openGroups.add(data.key);
-                else archiveUiState.openGroups.delete(data.key);
-            });
-
-            const contentOuter = document.createElement('div');
-            contentOuter.className = 'my-fold-content';
-            const contentInner = document.createElement('div');
-            contentInner.className = 'my-fold-content-inner';
-
-            // 手搓聊天条目
-            data.chats.forEach(chat => {
-                const chatItem = document.createElement('div');
-                chatItem.className = `recentChat ${chat.isPinned ? 'is-pinned-row' : ''}`;
-                chatItem.dataset.order = String(chat.order);
-                chatItem.dataset.pinned = chat.isPinned ? 'true' : 'false';
-                chatItem.style.cssText = "display: flex !important; align-items: center; width: 100%; padding: 10px 16px; box-sizing: border-box; border-bottom: 1px solid rgba(120,120,120,0.2); cursor: pointer;";
-
-                chatItem.innerHTML = `
-                    <img src="${escapeHtml(chat.avatar)}" alt="" style="width: 40px; height: 40px; border-radius: 6px; margin-right: 12px; object-fit: cover; flex-shrink: 0;">
-                    <div style="flex:1; display:flex; flex-direction:column; min-width:0;">
-                        <div style="display:flex; justify-content:space-between; align-items:center; width:100%;">
-                            <span style="font-size:14px; color:var(--SmartThemeBodyColor); font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; flex:1; font-family: 'Noto Serif SC', 'Songti SC', 'SimSun', serif; letter-spacing: 1px;">${escapeHtml(chat.title)}</span>
-                            <div class="action-group" style="display:flex; gap:10px; flex-shrink:0; margin-left: 10px; opacity: 0.5; transition: opacity 0.2s;">
-                                <i class="fa-solid fa-thumbtack chat-pin-btn ${chat.isPinned ? 'pinned' : ''}" title="置顶"></i>
-                                <i class="fa-solid fa-pen-to-square" style="color: color-mix(in srgb, var(--SmartThemeBodyColor) 40%, transparent);" title="编辑"></i>
-                                <i class="fa-solid fa-trash" style="color: color-mix(in srgb, var(--SmartThemeBodyColor) 40%, transparent);" title="删除"></i>
-                            </div>
-                        </div>
-                        <div style="display:flex; justify-content:space-between; align-items:center; width:100%; margin-top:6px;">
-                            <span style="font-size:11px; color:color-mix(in srgb, var(--SmartThemeBodyColor) 50%, transparent); font-family: 'Courier New', Courier, monospace;">${escapeHtml(chat.date)}</span>
-                            <div style="font-size:11px; color:color-mix(in srgb, var(--SmartThemeBodyColor) 50%, transparent); transform: scale(0.9); transform-origin: right center; font-family: 'Courier New', Courier, monospace;">${chat.statsHtml}</div>
-                        </div>
-                    </div>
-                `;
-
-                chatItem.addEventListener('mouseenter', () => chatItem.querySelector('.action-group').style.opacity = '1');
-                chatItem.addEventListener('mouseleave', () => chatItem.querySelector('.action-group').style.opacity = '0.5');
-                chatItem.addEventListener('click', () => chat.originalNode.click());
-
-                const btns = chatItem.querySelectorAll('.action-group i');
-
-                // 组内置顶：完全脱离原生
-                btns[0].addEventListener('click', (e) => {
-                    e.stopPropagation();
-
-                    const state = getArchiveState();
-                    const pins = state.pinnedChats;
-                    const currentlyPinned = pins[chat.pinKey] === true || pins[chat.fileKey] === true;
-                    const newState = !currentlyPinned;
-
-                    if (newState) {
-                        pins[chat.pinKey] = true;
-                    } else {
-                        delete pins[chat.pinKey];
-                        delete pins[chat.fileKey];
-                    }
-                    persistArchiveState();
-
-                    chat.isPinned = newState;
-                    chatItem.classList.toggle('is-pinned-row', newState);
-                    chatItem.dataset.pinned = newState ? 'true' : 'false';
-                    btns[0].classList.toggle('pinned', newState);
-
-                    if (newState) {
-                        contentInner.prepend(chatItem);
-                    } else {
-                        // 取消置顶后放回原本的时间位置，而不是直接扔到最后
-                        const anchor = Array.from(contentInner.children).find(row => {
-                            if (row === chatItem) return false;
-                            if (row.dataset.pinned === 'true') return false;
-                            return Number(row.dataset.order) > chat.order;
-                        });
-                        contentInner.insertBefore(chatItem, anchor || null);
-                    }
-                });
-
-                btns[1].addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    if (chat.renameNode) chat.renameNode.click();
-                });
-                btns[2].addEventListener('click', (e) => { e.stopPropagation(); if (chat.deleteNode) chat.deleteNode.click(); });
-
-                contentInner.appendChild(chatItem);
-            });
-
-            contentOuter.appendChild(contentInner);
-            groupDiv.appendChild(header);
-            groupDiv.appendChild(contentOuter);
-            listContainer.appendChild(groupDiv);
-        });
-
-        // 4. 分页、搜索与排序
         const searchInput = wrapper.querySelector('.archive-search-input');
         const searchBtn = wrapper.querySelector('.archive-search-btn');
         const resetBtn = wrapper.querySelector('.archive-reset-btn');
@@ -803,109 +987,123 @@ function setArchiveRenderLimit(value) {
         const nextBtn = wrapper.querySelector('.page-next');
         const pageInfo = wrapper.querySelector('.page-info');
 
-        // 重命名存档 / 修改渲染上限会导致首页整块重建：恢复之前停留的页码、搜索词和排序
         searchInput.value = archiveUiState.search || '';
         if (archiveUiState.sort
             && Array.from(sortSelect.options).some(option => option.value === archiveUiState.sort)) {
             sortSelect.value = archiveUiState.sort;
         }
 
-        let currentPage = Math.max(1, Number(archiveUiState.page) || 1);
-        const pageSize = 10;
-
-        function applySortAndFilter(resetPage = false) {
-            if (resetPage) currentPage = 1;
-            const keyword = searchInput.value.toLowerCase().trim();
-            const sortBy = sortSelect.value;
-            const groups = Array.from(listContainer.querySelectorAll('.my-fold-group'));
-
-            const visibleGroups = [];
-            groups.forEach(group => {
-                const name = group.getAttribute('data-name') || '';
-                const tags = group.getAttribute('data-tags') || '';
-                if (name.includes(keyword) || tags.includes(keyword)) {
-                    visibleGroups.push(group);
-                } else {
-                    group.style.display = 'none';
-                }
-            });
-
-            visibleGroups.sort((a, b) => {
-                const pinnedA = a.hasAttribute('data-pinned') ? 1 : 0;
-                const pinnedB = b.hasAttribute('data-pinned') ? 1 : 0;
-                if (pinnedA !== pinnedB) return pinnedB - pinnedA;
-
-                const orderA = Number(a.getAttribute('data-order')) || 0;
-                const orderB = Number(b.getAttribute('data-order')) || 0;
-
-                if (sortBy === 'time-desc') return orderA - orderB;
-                if (sortBy === 'time-asc') return orderB - orderA;
-                if (sortBy === 'name-asc') return (a.getAttribute('data-name') || '').localeCompare(b.getAttribute('data-name') || '');
-                if (sortBy === 'name-desc') return (b.getAttribute('data-name') || '').localeCompare(a.getAttribute('data-name') || '');
-                return 0;
-            });
-
-            const totalPages = Math.ceil(visibleGroups.length / pageSize) || 1;
-            if (currentPage > totalPages) currentPage = totalPages;
-            if (currentPage < 1) currentPage = 1;
-
-            const startIndex = (currentPage - 1) * pageSize;
-            const endIndex = startIndex + pageSize;
-
-            visibleGroups.forEach((group, index) => {
-                group.style.display = (index >= startIndex && index < endIndex) ? 'block' : 'none';
-                listContainer.appendChild(group);
-            });
-
-            pageInfo.innerText = `${currentPage} / ${totalPages}`;
-            pagination.style.display = 'flex';
-
-            if (totalPages <= 1) {
-                prevBtn.style.visibility = 'hidden';
-                nextBtn.style.visibility = 'hidden';
-            } else {
-                prevBtn.style.visibility = 'visible';
-                nextBtn.style.visibility = 'visible';
-            }
-
-            prevBtn.disabled = currentPage === 1;
-            nextBtn.disabled = currentPage === totalPages;
-
-            // 记住当前界面状态，供下一次重建恢复
-            archiveUiState.page = currentPage;
+        let searchTimer = 0;
+        const applySearchNow = (resetPage) => {
             archiveUiState.search = searchInput.value;
-            archiveUiState.sort = sortBy;
-        }
+            if (resetPage) archiveUiState.page = 1;
+            renderArchivePage();
+        };
 
-        searchBtn.addEventListener('click', () => applySortAndFilter(true));
-        searchInput.addEventListener('input', () => { archiveUiState.search = searchInput.value; });
-        searchInput.addEventListener('keyup', (e) => { if (e.key === 'Enter') applySortAndFilter(true); });
+        searchInput.addEventListener('input', () => {
+            // 输入框自己保持稳定（只重绘下面列表），再加 140ms 防抖：连打十个字也只排一次版。
+            clearTimeout(searchTimer);
+            archiveUiState.search = searchInput.value;
+            searchTimer = setTimeout(() => applySearchNow(true), 140);
+        });
+        searchInput.addEventListener('keyup', (event) => {
+            if (event.key !== 'Enter') return;
+            clearTimeout(searchTimer);
+            applySearchNow(true);
+        });
+        searchBtn.addEventListener('click', () => applySearchNow(true));
         resetBtn.addEventListener('click', () => {
             searchInput.value = '';
-            archiveUiState.search = '';
-            applySortAndFilter(true);
+            clearTimeout(searchTimer);
+            applySearchNow(true);
         });
         sortSelect.addEventListener('change', () => {
             archiveUiState.sort = sortSelect.value;
-            applySortAndFilter(true);
+            archiveUiState.page = 1;
+            renderArchivePage();
         });
-        prevBtn.addEventListener('click', () => { if (currentPage > 1) { currentPage--; applySortAndFilter(); } });
-        nextBtn.addEventListener('click', () => { currentPage++; applySortAndFilter(); });
+        prevBtn.addEventListener('click', () => {
+            if (archiveUiState.page <= 1) return;
+            archiveUiState.page -= 1;
+            renderArchivePage();
+        });
+        nextBtn.addEventListener('click', () => {
+            archiveUiState.page += 1;
+            renderArchivePage();
+        });
+
+        // 整页只挂一个点击监听：哪怕一页有几百行，也不会产生几百个监听器。
+        listContainer.addEventListener('click', handleArchiveListClick);
+
+        archiveView.wrapper = wrapper;
+        archiveView.nativeList = null;
+        archiveView.listContainer = listContainer;
+        archiveView.searchInput = searchInput;
+        archiveView.sortSelect = sortSelect;
+        archiveView.pageInfo = pageInfo;
+        archiveView.prevBtn = prevBtn;
+        archiveView.nextBtn = nextBtn;
+        archiveView.pagination = pagination;
+
+        return wrapper;
+    }
+
+    function buildArchive(nativeList, signature) {
+        const collected = collectArchiveGroups(nativeList);
+        if (!collected.groups.length) return;
+
+        disconnectArchiveObservers();
+
+        archiveView.groups = collected.groups;
+        archiveView.groupByKey = collected.groupByKey;
+        archiveView.chatsByOrder = collected.chatsByOrder;
+        archiveView.nativeList = nativeList;
+
+        refreshPinnedCharSets();
+
+        archiveView.wrapper?.remove();
+        const wrapper = createArchiveSkeleton();
+        archiveView.nativeList = nativeList;
 
         nativeList.insertAdjacentElement('afterend', wrapper);
         nativeList.style.display = 'none';
-        applySortAndFilter(false);
+        wrapper.dataset.signature = signature;
+
+        renderArchivePage();
         restoreArchiveScrollPosition();
     }
 
+    function renderArchiveList() {
+        const nativeList = document.querySelector('.recentChatList');
+        if (!nativeList) return;
+
+        const signature = computeNativeSignature(nativeList);
+        try {
+            buildArchive(nativeList, signature);
+        } catch (error) {
+            console.warn('[ST-档案馆] 重建首页档案馆失败', error);
+        }
+    }
+
     // 进入酒馆、关闭聊天、切换角色时，原生的欢迎面板会被整块重新渲染。
-    // 之前靠 200ms 轮询，最坏要等两帧才重建，中间那段空白就是“闪一下”的来源。
-    // 这里用 MutationObserver 在 DOM 变化的下一帧立刻重建，轮询只作为兜底。
+    // 用 MutationObserver 在 DOM 变化的下一帧立刻重建；轮询只做兜底，而且非常便宜：
+    // 没换面板时只读几个属性（子节点数 + 首尾文件名 + limit）就直接 return。
     let archiveRenderFrame = 0;
 
     function runArchiveRender() {
+        const nativeList = document.querySelector('.recentChatList');
+        if (!nativeList) return;
+
+        const signature = computeNativeSignature(nativeList);
+        const wrapper = nativeList.parentElement?.querySelector('.my-folded-wrapper');
+
+        if (wrapper && wrapper.isConnected && wrapper.dataset.signature === signature) {
+            if (nativeList.style.display !== 'none') nativeList.style.display = 'none';
+            return;
+        }
+
         try {
-            renderArchiveList();
+            buildArchive(nativeList, signature);
         } catch (error) {
             console.warn('[ST-档案馆] 重建首页档案馆失败', error);
         }
@@ -957,11 +1155,13 @@ function setArchiveRenderLimit(value) {
     document.addEventListener('visibilitychange', () => {
         if (!document.hidden) queueArchiveRender();
     });
-    setInterval(queueArchiveRender, 200);
+    // 兜底轮询：从 200ms 放宽到 800ms，而且命中缓存时几乎不做事。
+    setInterval(queueArchiveRender, 800);
 })();
 
+
 (function () {
-    console.log("📚 [ST-档案馆] 拾遗模块已加载！");
+    console.log("📚 [ST-档案馆] 拾遗模块已加载（v1.3.0）！");
 
     if (document.getElementById('quote-fab')) return;
 
@@ -1026,6 +1226,8 @@ function setArchiveRenderLimit(value) {
     function saveQuotes() {
         const state = getArchiveState();
         state.quotes = savedQuotes;
+        // 收藏一改动，索引与“已渲染”缓存立刻作废，下一次同步会按新数据重建。
+        bumpQuotesRevision();
         persistArchiveState();
     }
 
@@ -1134,7 +1336,7 @@ function setArchiveRenderLimit(value) {
     }
 
     function hydrateLegacyQuotes(chatInfo, ctx) {
-        if (!chatInfo?.active) return;
+        if (!chatInfo?.active) return false;
 
         let changed = false;
         savedQuotes.forEach(quote => {
@@ -1149,6 +1351,7 @@ function setArchiveRenderLimit(value) {
         });
 
         if (changed) saveQuotes();
+        return changed;
     }
 
     function stripChatFileExtension(value) {
@@ -1163,26 +1366,37 @@ function setArchiveRenderLimit(value) {
         return { scope: key.slice(0, index), chatId: key.slice(index + 2) };
     }
 
-    // 角色名 / 群名同样取实时值：改过角色名之后，旧收藏也不该继续显示旧名字
+    // 角色名 / 群名同样取实时值：改过角色名之后，旧收藏也不该继续显示旧名字。
+    // 每个 scope 只查一次角色表；3000 条收藏来自 500 个聊天时，不会做 3000 次 find。
+    let liveCharNameCache = new Map();
+
     function getLiveCharName(scope, fallback) {
         const key = String(scope || '');
+        if (!key) return fallback;
+
+        if (liveCharNameCache.has(key)) {
+            return liveCharNameCache.get(key) || fallback;
+        }
+
         const ctx = getChatContext();
+        let resolved = '';
 
         try {
             if (ctx && key.startsWith('char:')) {
                 const avatar = key.slice(5);
                 const character = ctx.characters?.find?.(item => item?.avatar === avatar);
-                if (character?.name) return String(character.name).trim();
+                if (character?.name) resolved = String(character.name).trim();
             } else if (ctx && key.startsWith('group:')) {
                 const groupId = key.slice(6);
                 const group = ctx.groups?.find?.(item => String(item?.id) === groupId);
-                if (group?.name) return String(group.name).trim();
+                if (group?.name) resolved = String(group.name).trim();
             }
         } catch (error) {
             console.warn('[ST-档案馆] 解析角色/群实时名称失败', error);
         }
 
-        return fallback;
+        liveCharNameCache.set(key, resolved);
+        return resolved || fallback;
     }
 
     // 聊天记录改名后文件也会改名，所以名字的唯一可靠来源是“当前渲染出来的最近聊天列表”。
@@ -1191,6 +1405,7 @@ function setArchiveRenderLimit(value) {
 
     function invalidateLiveChatNameCache() {
         liveChatNameCache = { at: 0, map: new Map() };
+        liveCharNameCache = new Map();
     }
 
     function getLiveChatNameIndex(force = false) {
@@ -1310,6 +1525,9 @@ function setArchiveRenderLimit(value) {
         if (changed) {
             saveQuotes();
             renderQuotes();
+            // 改名后当前聊天的 chatKey 变了，让同步引擎下一轮重新判定并重画
+            runtimeChatKey = '';
+            refreshAllSynced();
         }
     }
 
@@ -1321,6 +1539,10 @@ function setArchiveRenderLimit(value) {
             if (eventSource?.on && eventTypes?.CHAT_RENAMED) {
                 eventSource.on(eventTypes.CHAT_RENAMED, handleChatRenamed);
             }
+            // 角色/群改名后，拾遗里显示的实时名字也要跟着换
+            [eventTypes?.CHARACTER_RENAMED, eventTypes?.GROUP_UPDATED, eventTypes?.CHARACTER_EDITED]
+                .filter(Boolean)
+                .forEach(type => eventSource.on(type, invalidateLiveChatNameCache));
         } catch (error) {
             console.warn('[ST-档案馆] 监听聊天改名事件失败', error);
         }
@@ -1459,7 +1681,9 @@ function setArchiveRenderLimit(value) {
             position: relative;
             background: #ffffff; padding: 12px 38px 12px 15px;
             border-left: 3px solid #a45050; border-radius: 6px;
-            cursor: pointer; transition: all 0.2s;
+            cursor: pointer;
+            /* 只过渡真正会变的属性，别用 transition: all 拖累大量卡片的绘制 */
+            transition: background-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
             box-shadow: 0 2px 8px rgba(0,0,0,0.03);
         }
         .quote-card:hover { background: #faf8f5; box-shadow: 0 4px 12px rgba(0,0,0,0.06); transform: translateY(-1px); }
@@ -1671,61 +1895,498 @@ function setArchiveRenderLimit(value) {
     // 改名事件只发一次，越早挂上越好（不依赖面板是否打开）
     bindChatRenameListener();
 
-    function injectBookmarks() {
+    // ==================================================
+    // 正文渲染引擎：从“每秒全书扫描”改成“事件驱动 + 只看可见”
+    // --------------------------------------------------
+    // 旧版每秒都把整场聊天里所有 .mes 扫一遍，每个楼层还要把几百条收藏挨个比对，
+    // 收藏越多、楼越高，每秒做的无用功就越多，滚动自然掉帧。
+    // 新版做四件事：
+    //   1) 建索引：按楼层号直接查，不再挨个比对；
+    //   2) 只处理变化：MutationObserver 告诉你哪条消息新增/改动了；
+    //   3) 只算看得见：IntersectionObserver 在消息快滚进屏幕时才补书签和下划线；
+    //   4) 下划线交给浏览器原生 Highlight，不再往正文里塞几千个 span。
+    // ==================================================
+
+    const EMPTY_QUOTE_INDEX = { chatKey: '', revision: -1, byMesid: new Map(), looseSelections: [] };
+
+    let quotesRevision = 0;
+    let quoteIndexCache = null;
+
+    function bumpQuotesRevision() {
+        quotesRevision++;
+        quoteIndexCache = null;
+    }
+
+    function getQuoteIndexForChat(chatInfo, ctx) {
+        if (!chatInfo?.active) return EMPTY_QUOTE_INDEX;
+
+        if (quoteIndexCache
+            && quoteIndexCache.chatKey === chatInfo.key
+            && quoteIndexCache.revision === quotesRevision) {
+            return quoteIndexCache;
+        }
+
+        const byMesid = new Map();
+        const looseSelections = [];
+
+        for (const quote of savedQuotes) {
+            if (!quote || typeof quote !== 'object') continue;
+
+            const mesid = String(quote.mesid ?? '').trim();
+            if (!/^\d+$/.test(mesid)) continue;
+
+            const chatKey = String(quote.chatKey || '');
+            if (!chatKey) {
+                // 老数据没有 chatKey，没法参与 O(1) 索引；交给选择判重时用文本兜底。
+                if (quote.source === 'selection') looseSelections.push(quote);
+                continue;
+            }
+            if (chatKey !== chatInfo.key) continue;
+
+            let entry = byMesid.get(mesid);
+            if (!entry) {
+                entry = { whole: new Set(), selections: [] };
+                byMesid.set(mesid, entry);
+            }
+
+            if (quote.source === 'selection') {
+                entry.selections.push(quote);
+            } else {
+                entry.whole.add(String(quote.char ?? ''));
+            }
+        }
+
+        quoteIndexCache = {
+            chatKey: chatInfo.key,
+            revision: quotesRevision,
+            byMesid,
+            looseSelections,
+        };
+        return quoteIndexCache;
+    }
+
+    function getMessageCharName(mes) {
+        const nameEl = mes.querySelector('.ch_name .name_text');
+        return normalizeCharName(
+            (nameEl?.textContent || mes.getAttribute('ch_name') || '未知角色').trim()
+        );
+    }
+
+    function isMessageBookmarked(mesid, charName, chatInfo, ctx) {
+        if (!chatInfo?.active) return false;
+        const index = getQuoteIndexForChat(chatInfo, ctx);
+        const entry = index.byMesid.get(String(mesid));
+        return Boolean(entry && entry.whole.has(String(charName)));
+    }
+
+    let hydratedChatKey = '';
+
+    function ensureChatHydrated(chatInfo, ctx) {
+        if (!chatInfo?.active) return false;
+        if (hydratedChatKey === chatInfo.key) return false;
+
+        hydratedChatKey = chatInfo.key;
+        const changed = hydrateLegacyQuotes(chatInfo, ctx);
+        if (changed) {
+            bumpQuotesRevision();
+            refreshAllSynced();
+        }
+        return changed;
+    }
+
+    // ---- 消息同步队列 ----
+    let messageSyncState = new WeakMap();
+    const syncedMessages = new Set();
+    const visibleMessages = new Set();
+    const dirtyMessages = new Set();
+    const forcedMessages = new Set();
+    let syncFrame = 0;
+
+    function scheduleMessageSync(mes, force = false) {
+        if (!(mes instanceof Element) || !mes.classList.contains('mes')) return;
+        if (!mes.isConnected) return;
+
+        dirtyMessages.add(mes);
+        if (force) forcedMessages.add(mes);
+        requestSyncFlush();
+    }
+
+    function requestSyncFlush() {
+        if (syncFrame) return;
+        syncFrame = requestAnimationFrame(() => {
+            syncFrame = 0;
+            flushDirtyMessages();
+        });
+    }
+
+    function flushDirtyMessages() {
+        if (!dirtyMessages.size) return;
+
         const ctx = getChatContext();
         const chatInfo = getCurrentChatInfo();
 
-        document.querySelectorAll('.mes').forEach(mes => {
-            // 绝不能给隐藏的消息模板注入按钮：模板会在创建新楼层时被整块克隆
-            if (mes.closest('.template_element') || mes.closest('#message_template')) {
-                mes.querySelectorAll('.mes-bookmark-btn').forEach(btn => btn.remove());
-                return;
+        if (!chatInfo.active) {
+            dirtyMessages.clear();
+            forcedMessages.clear();
+            return;
+        }
+
+        ensureChatHydrated(chatInfo, ctx);
+        const index = getQuoteIndexForChat(chatInfo, ctx);
+
+        // 一次只花 ~9ms：剩下的下一帧接着做，主线程永远不会被一条长任务堵死。
+        const startedAt = performance.now();
+        for (const mes of dirtyMessages) {
+            dirtyMessages.delete(mes);
+
+            if (!mes.isConnected) continue;
+
+            const force = forcedMessages.delete(mes);
+            syncMessage(mes, chatInfo, ctx, index, force);
+
+            if (performance.now() - startedAt > 9) {
+                requestSyncFlush();
+                break;
             }
+        }
+    }
 
-            if (mes.getAttribute('is_user') === 'true') {
-                mes.querySelectorAll('.mes-bookmark-btn').forEach(btn => btn.remove());
-                return;
-            }
+    function syncBookmarkButton(mes, mesid, charName, isSaved, isUser) {
+        let btn = mes.querySelector('.mes-bookmark-btn');
 
-            const mesid = mes.getAttribute('mesid');
-            if (mesid === null || mesid === '') return;
+        if (isUser) {
+            if (btn) btn.remove();
+            return true;
+        }
 
-            // 始终以真实楼层为准，兼容从模板克隆出来的旧按钮
-            const nameEl = mes.querySelector('.ch_name .name_text');
-            const charName = normalizeCharName(
-                (nameEl?.textContent || mes.getAttribute('ch_name') || '未知角色').trim()
-            );
-            const isSaved = messageHasQuote(mesid, charName, chatInfo, ctx);
-
-            const existingBtn = mes.querySelector('.mes-bookmark-btn');
-            if (existingBtn) {
-                existingBtn.setAttribute('data-mesid', mesid);
-                existingBtn.setAttribute('data-char', charName);
-                existingBtn.classList.toggle('saved', isSaved);
-                existingBtn.innerHTML = isSaved
-                    ? '<i class="fa-solid fa-bookmark"></i>'
-                    : '<i class="fa-regular fa-bookmark"></i>';
-                return;
-            }
-
+        if (!btn) {
             const targetArea = mes.querySelector('.mes_buttons');
-            if (!targetArea) return;
+            // 消息还没有完全渲染出来：等一会儿再补，不能把“没按钮”写进缓存
+            if (!targetArea) return false;
 
-            const btn = document.createElement('div');
+            btn = document.createElement('div');
             btn.className = 'mes-bookmark-btn';
-            btn.setAttribute('data-mesid', mesid);
-            btn.setAttribute('data-char', charName);
-            btn.title = "收录此句";
+            btn.title = '收录此句';
+            targetArea.appendChild(btn);
+        }
+
+        if (btn.dataset.mesid !== mesid) btn.dataset.mesid = mesid;
+        if (btn.dataset.char !== charName) btn.dataset.char = charName;
+
+        if (btn.dataset.saved !== String(isSaved)) {
+            btn.dataset.saved = String(isSaved);
             btn.classList.toggle('saved', isSaved);
             btn.innerHTML = isSaved
                 ? '<i class="fa-solid fa-bookmark"></i>'
                 : '<i class="fa-regular fa-bookmark"></i>';
+        }
 
-            targetArea.appendChild(btn);
+        return true;
+    }
+
+    function syncMessage(mes, chatInfo, ctx, index, force = false) {
+        if (!mes.isConnected) return;
+
+        if (mes.closest('.template_element') || mes.closest('#message_template')) {
+            mes.querySelectorAll('.mes-bookmark-btn').forEach(btn => btn.remove());
+            removeUnderlinesForMessage(mes);
+            messageSyncState.delete(mes);
+            return;
+        }
+
+        const mesid = String(mes.getAttribute('mesid') ?? '').trim();
+        if (!mesid) return;
+
+        const isUser = mes.getAttribute('is_user') === 'true';
+        const charName = isUser ? '' : getMessageCharName(mes);
+        const entry = index.byMesid.get(mesid) || null;
+        const wanted = entry ? entry.selections : [];
+        const wantedKey = wanted.map(archiveQuoteKey).filter(Boolean).sort().join('|');
+        const isSaved = !isUser && Boolean(entry && entry.whole.has(charName));
+
+        const previous = messageSyncState.get(mes);
+        const container = mes.querySelector('.mes_text');
+        const containerChanged = !previous || previous.container !== container;
+
+        // 核心：状态没变就什么都不做。滚动时绝不再重复排版 / 重画。
+        const needsUnderline = wanted.length > 0 || Boolean(previous?.keys);
+        const cacheValid = Boolean(previous)
+            && previous.mesid === mesid
+            && previous.char === charName
+            && previous.saved === isSaved
+            && previous.keys === wantedKey
+            && !containerChanged
+            && (!force || !needsUnderline);
+
+        if (cacheValid) return;
+
+        const buttonReady = syncBookmarkButton(mes, mesid, charName, isSaved, isUser);
+
+        if (previous && (containerChanged || force || previous.keys !== wantedKey)) {
+            removeUnderlinesForMessage(mes);
+        }
+        if (wanted.length) {
+            syncUnderlinesForMessage(mes, wanted);
+        }
+
+        if (!buttonReady) {
+            // 消息还没有 .mes_buttons：不写缓存，也不做 300ms 死循环重试。
+            // 下一次“可见性检查 / 消息变化”会再补，最多晚 2 秒，绝不会拖慢滚动。
+            return;
+        }
+
+        messageSyncState.set(mes, {
+            mesid,
+            char: charName,
+            saved: isSaved,
+            keys: wantedKey,
+            container,
+            chatKey: chatInfo.key,
+        });
+        syncedMessages.add(mes);
+    }
+
+    function refreshAllSynced() {
+        syncedMessages.forEach(mes => {
+            if (mes.isConnected) dirtyMessages.add(mes);
+            else syncedMessages.delete(mes);
+        });
+        visibleMessages.forEach(mes => {
+            if (mes.isConnected) dirtyMessages.add(mes);
+        });
+        requestSyncFlush();
+    }
+
+    function scheduleVisibleSync() {
+        visibleMessages.forEach(mes => {
+            if (mes.isConnected) scheduleMessageSync(mes);
+        });
+    }
+
+    function syncMessageForMesid(mesid) {
+        const id = String(mesid ?? '').trim();
+        if (!/^\d+$/.test(id)) return;
+
+        const mes = document.querySelector(`#chat .mes[mesid="${CSS.escape(id)}"]`);
+        if (mes) scheduleMessageSync(mes);
+    }
+
+    // 兼容旧调用：以前叫 injectBookmarks()，现在只重算已经处理过的消息，不再全量扫。
+    function injectBookmarks() {
+        refreshAllSynced();
+    }
+
+    // ---- 可见性 / DOM 变化监听 ----
+    let observersStarted = false;
+    let messageIntersectionObserver = null;
+    let chatMutationObserver = null;
+    let observedMessages = new WeakSet();
+
+    function observeMessageElement(mes) {
+        if (!(mes instanceof Element) || !mes.classList.contains('mes')) return;
+        if (mes.closest('.template_element') || mes.closest('#message_template')) return;
+        if (observedMessages.has(mes)) return;
+
+        observedMessages.add(mes);
+        messageIntersectionObserver?.observe(mes);
+    }
+
+    function collectMesNodes(node, out) {
+        if (!(node instanceof Element)) return;
+        if (node.classList.contains('mes')) {
+            out.push(node);
+            return;
+        }
+        node.querySelectorAll?.('.mes').forEach(mes => out.push(mes));
+    }
+
+    function closestMesNode(node) {
+        const el = node instanceof Element ? node : node?.parentElement;
+        return el?.closest?.('.mes') || null;
+    }
+
+    function scanMessages(root = document.getElementById('chat')) {
+        if (!root) return;
+        root.querySelectorAll('.mes').forEach(observeMessageElement);
+    }
+
+    function startMessageObservers() {
+        observersStarted = true;
+
+        const chat = document.getElementById('chat');
+        if (!chat) return;
+
+        if (messageIntersectionObserver) {
+            try { messageIntersectionObserver.disconnect(); } catch (error) { /* 忽略 */ }
+        }
+        if (chatMutationObserver) {
+            try { chatMutationObserver.disconnect(); } catch (error) { /* 忽略 */ }
+        }
+
+        observedMessages = new WeakSet();
+
+        if (typeof IntersectionObserver === 'function') {
+            messageIntersectionObserver = new IntersectionObserver(entries => {
+                for (const entry of entries) {
+                    const mes = entry.target;
+                    if (!(mes instanceof Element) || !mes.isConnected) continue;
+
+                    if (entry.isIntersecting) {
+                        visibleMessages.add(mes);
+                        scheduleMessageSync(mes);
+                    } else {
+                        visibleMessages.delete(mes);
+                    }
+                }
+            }, { root: chat, rootMargin: '800px 0px' });
+        } else {
+            // 非常老的浏览器：没有 IntersectionObserver，就退回“消息出现时同步一次”
+            messageIntersectionObserver = {
+                observe(mes) { scheduleMessageSync(mes); },
+                unobserve() {},
+                disconnect() {},
+            };
+        }
+
+        scanMessages(chat);
+
+        chatMutationObserver = new MutationObserver(records => {
+            const touched = new Set();
+            const removed = [];
+
+            for (const record of records) {
+                if (isOwnUnderlineMutation(record)) continue;
+
+                if (record.type === 'characterData') {
+                    const host = closestMesNode(record.target);
+                    if (host) touched.add(host);
+                    continue;
+                }
+                if (record.type !== 'childList') continue;
+
+                record.addedNodes.forEach(node => {
+                    if (!(node instanceof Element)) return;
+                    const inside = [];
+                    collectMesNodes(node, inside);
+                    inside.forEach(mes => {
+                        observeMessageElement(mes);
+                        touched.add(mes);
+                    });
+                });
+
+                record.removedNodes.forEach(node => {
+                    if (!(node instanceof Element)) return;
+                    collectMesNodes(node, removed);
+                });
+
+                const host = closestMesNode(record.target);
+                if (host) touched.add(host);
+            }
+
+            removed.forEach(mes => messageIntersectionObserver?.unobserve(mes));
+
+            touched.forEach(mes => {
+                if (!mes.isConnected) return;
+                // 新消息等 IntersectionObserver 靠近屏幕再处理；已经处理过的才需要立刻重算
+                if (visibleMessages.has(mes) || messageSyncState.has(mes)) {
+                    scheduleMessageSync(mes, true);
+                }
+            });
         });
 
-        // 每次同步楼层书签时顺手校准正文下划线（稳态下不做任何 DOM 修改）
-        applyQuoteUnderlines();
+        chatMutationObserver.observe(chat, { childList: true, subtree: true, characterData: true });
+    }
+
+    // ---- 聊天切换 ----
+    let runtimeChatKey = '';
+
+    function resetQuoteRuntime(chatInfo, ctx) {
+        visibleMessages.clear();
+        syncedMessages.clear();
+        dirtyMessages.clear();
+        forcedMessages.clear();
+        messageSyncState = new WeakMap();
+        hydratedChatKey = '';
+
+        clearAllUnderlines();
+
+        if (observersStarted) startMessageObservers();
+        if (chatInfo?.active) ensureChatHydrated(chatInfo, ctx);
+    }
+
+    function ensureRuntimeChat() {
+        const ctx = getChatContext();
+        const chatInfo = getCurrentChatInfo();
+        const key = chatInfo.active ? chatInfo.key : '';
+
+        if (key !== runtimeChatKey) {
+            runtimeChatKey = key;
+            resetQuoteRuntime(chatInfo, ctx);
+        }
+
+        return { chatInfo, ctx };
+    }
+
+    function safetyTick() {
+        try {
+            ensureRuntimeChat();
+            if (!messageIntersectionObserver) startMessageObservers();
+            scanMessages();
+            scheduleVisibleSync();
+
+            if (syncedMessages.size > 256) {
+                syncedMessages.forEach(mes => {
+                    if (!mes.isConnected) syncedMessages.delete(mes);
+                });
+            }
+        } catch (error) {
+            console.warn('[ST-档案馆] 同步书签/下划线失败', error);
+        }
+    }
+
+    function startQuoteRuntime() {
+        const ctx = getChatContext();
+        const chatInfo = getCurrentChatInfo();
+        runtimeChatKey = chatInfo.active ? chatInfo.key : '';
+
+        if (chatInfo.active) ensureChatHydrated(chatInfo, ctx);
+
+        startMessageObservers();
+
+        const eventSource = ctx?.eventSource;
+        const eventTypes = ctx?.eventTypes;
+        if (eventSource?.on && eventTypes) {
+            [eventTypes.CHAT_CHANGED, eventTypes.CHAT_LOADED, eventTypes.MORE_MESSAGES_LOADED]
+                .filter(Boolean)
+                .forEach(type => {
+                    eventSource.on(type, () => {
+                        ensureRuntimeChat();
+                        // 新面板可能还在同一帧里陆续插入，等下一帧再扫一次
+                        requestAnimationFrame(() => {
+                            scanMessages();
+                            scheduleVisibleSync();
+                        });
+                    });
+                });
+
+            [eventTypes.CHARACTER_MESSAGE_RENDERED, eventTypes.USER_MESSAGE_RENDERED]
+                .filter(Boolean)
+                .forEach(type => {
+                    eventSource.on(type, () => {
+                        scanMessages();
+                        scheduleVisibleSync();
+                    });
+                });
+        }
+
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) return;
+            scanMessages();
+            scheduleVisibleSync();
+        });
+
+        // 兜底：每 2 秒只做一次“很便宜的检查”。有缓存时不会产生任何 DOM 写入。
+        setInterval(safetyTick, 2000);
     }
 
     function renderQuotePoem(list) {
@@ -1819,6 +2480,8 @@ function setArchiveRenderLimit(value) {
     function closeQuotePanel() {
         hideQuoteDetail();
         overlay.classList.remove('show');
+        // 面板关掉后没必要继续观察“加载更多”的哨兵
+        if (typeof disconnectPanelObservers === 'function') disconnectPanelObservers();
     }
 
     // 旋转屏幕、地址栏收起/展开、软键盘变化时，重新把详情弹层钉回可见视口
@@ -1829,43 +2492,40 @@ function setArchiveRenderLimit(value) {
         window.visualViewport.addEventListener('scroll', refreshQuoteDetailBounds);
     }
 
-    function syncBookmarkAfterDelete(quote, chatInfo, ctx) {
-        if (!chatInfo?.active) return;
-
-        const belongs = quote.chatKey
-            ? quote.chatKey === chatInfo.key
-            : quoteMatchesCurrentChat(quote, chatInfo, ctx);
-        if (!belongs) return;
-
-        const mesid = String(quote.mesid ?? '');
-        const mes = document.querySelector(`.mes[mesid="${CSS.escape(mesid)}"]`);
-        if (!mes) return;
-
-        const btn = mes.querySelector('.mes-bookmark-btn');
-        if (!btn) return;
-
-        const nameEl = mes.querySelector('.ch_name .name_text');
-        const charName = normalizeCharName(
-            (nameEl?.textContent || mes.getAttribute('ch_name') || '未知角色').trim()
-        );
-        const stillSaved = messageHasQuote(mesid, charName, chatInfo, ctx);
-
-        btn.setAttribute('data-mesid', mesid);
-        btn.setAttribute('data-char', charName);
-        btn.classList.toggle('saved', stillSaved);
-        btn.innerHTML = stillSaved
-            ? '<i class="fa-solid fa-bookmark"></i>'
-            : '<i class="fa-regular fa-bookmark"></i>';
+    function syncBookmarkAfterDelete(quote) {
+        // 只重算“这条收藏所在的楼层”，不再顺带把整场聊天扫一遍。
+        syncMessageForMesid(quote?.mesid);
     }
 
-    function deleteQuote(quote, chatInfo) {
-        const ctx = getChatContext();
+    function deleteQuote(quote, cardEl = null) {
         savedQuotes = savedQuotes.filter(item => item !== quote);
         saveQuotes();
-        syncBookmarkAfterDelete(quote, chatInfo, ctx);
-        renderQuotes();
-        // 取消收藏后正文里的下划线要立刻消失
-        applyQuoteUnderlines();
+        syncBookmarkAfterDelete(quote);
+
+        // 删除单张卡片时只抠掉这一张，不重排整个面板，滚动位置和已加载的卡片都保住。
+        if (cardEl instanceof Element && cardEl.isConnected) {
+            const groupEl = cardEl.closest('.quote-group');
+            cardEl.remove();
+
+            if (!groupEl) return;
+
+            const groupData = panelGroupData.get(groupEl.dataset.key);
+            if (!groupData) return;
+
+            const index = groupData.quotes.indexOf(quote);
+            if (index >= 0) groupData.quotes.splice(index, 1);
+
+            const countEl = groupEl.querySelector('.quote-group-count');
+            if (countEl) countEl.textContent = `${groupData.quotes.length} 条`;
+
+            if (!groupData.quotes.length) {
+                groupEl.remove();
+                panelGroupData.delete(groupEl.dataset.key);
+            }
+            return;
+        }
+
+        if (overlay.classList.contains('show')) renderQuotes();
     }
 
     // ==================================================
@@ -2057,6 +2717,8 @@ function setArchiveRenderLimit(value) {
                 }
 
                 if (added > 0 || pinAdded > 0) {
+                    // 备份里可能带老格式（没有 chatKey）的收藏，重新做一次“认领”
+                    hydratedChatKey = '';
                     renderQuotes();
                     injectBookmarks();
                 }
@@ -2077,7 +2739,84 @@ function setArchiveRenderLimit(value) {
         reader.readAsText(file);
     }
 
-    function createQuoteCard(quote, mode, chatInfo) {
+    // ==================================================
+    // 拾遗面板：按住“看得见的那一屏”渲染
+    // --------------------------------------------------
+    // 旧版只要收藏有 3000 条，就会一次性建 3000 张卡片 + 6000 个监听器，
+    // 打开面板必卡。现在：
+    //   · 当前聊天：先建 40 张，滚到底再补下一批；
+    //   · 全部聊天：只建立分组标题，点开哪组才建哪组的卡片；
+    //   · 整个面板只挂一个点击监听（事件委托）。
+    // ==================================================
+
+    const QUOTE_CARD_CHUNK = 40;
+    const QUOTE_GROUP_HEADER_CHUNK = 60;
+
+    let panelObservers = [];
+    let panelGroupData = new Map();
+    const quoteCardMap = new WeakMap();
+
+    function disconnectPanelObservers() {
+        panelObservers.forEach(observer => {
+            try { observer.disconnect(); } catch (error) { /* 忽略 */ }
+        });
+        panelObservers = [];
+    }
+
+    function observePanelSentinel(element, root, callback) {
+        let revealed = false;
+        let observer = null;
+
+        const reveal = () => {
+            if (revealed) return;
+            revealed = true;
+            if (observer) {
+                try { observer.disconnect(); } catch (error) { /* 忽略 */ }
+                panelObservers = panelObservers.filter(item => item !== observer);
+            }
+            element.remove();
+            callback();
+        };
+
+        // 点击“···”也能加载：IO 万一被主题/布局影响，功能仍然可用
+        element.addEventListener('click', reveal);
+
+        if (typeof IntersectionObserver !== 'function') {
+            reveal();
+            return;
+        }
+
+        observer = new IntersectionObserver(entries => {
+            if (!entries.some(entry => entry.isIntersecting)) return;
+            reveal();
+        }, { root: root || null, rootMargin: '600px 0px' });
+
+        observer.observe(element);
+        panelObservers.push(observer);
+    }
+
+    function appendQuoteCardChunk(container, quotes, start, root) {
+        if (start >= quotes.length) return;
+
+        const end = Math.min(quotes.length, start + QUOTE_CARD_CHUNK);
+        const fragment = document.createDocumentFragment();
+
+        for (let index = start; index < end; index++) {
+            fragment.appendChild(createQuoteCard(quotes[index]));
+        }
+        container.appendChild(fragment);
+
+        if (end >= quotes.length) return;
+
+        const more = document.createElement('div');
+        more.className = 'quote-load-more';
+        more.textContent = '···';
+        container.appendChild(more);
+
+        observePanelSentinel(more, root, () => appendQuoteCardChunk(container, quotes, end, root));
+    }
+
+    function createQuoteCard(quote) {
         const card = document.createElement('div');
         card.className = 'quote-card';
 
@@ -2100,58 +2839,86 @@ function setArchiveRenderLimit(value) {
         card.appendChild(timeDiv);
         card.appendChild(deleteBtn);
 
-        card.addEventListener('click', () => {
-            if (mode === 'all') {
-                showQuoteDetail(quote);
-                return;
-            }
-
-            const mesid = String(quote.mesid ?? '');
-            const targetMes = mesid
-                ? document.querySelector(`.mes[mesid="${CSS.escape(mesid)}"]`)
-                : null;
-
-            // 划词收藏可能来自消息以外的文字（没有楼层号），这时改为打开详情而不是无声失败
-            if (!targetMes) {
-                showQuoteDetail(quote);
-                return;
-            }
-
-            closeQuotePanel();
-            
-            // 🚨 加个延迟，等面板动画结束、DOM重排完毕后再高亮
-            setTimeout(() => {
-                targetMes.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                targetMes.classList.remove('highlight-mes');
-                void targetMes.offsetWidth; 
-                targetMes.classList.add('highlight-mes');
-                
-                // 🚨 核心：2秒后自动移除类名，彻底清理特效残留！
-                setTimeout(() => {
-                    targetMes.classList.remove('highlight-mes');
-                }, 2000);
-
-            }, 300);
-        });
-
-        deleteBtn.addEventListener('click', (event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            deleteQuote(quote, chatInfo);
-        });
-
+        quoteCardMap.set(card, quote);
         return card;
     }
 
-    function renderQuotes() {
+    function createQuoteGroupElement(data, root) {
+        const group = document.createElement('div');
+        group.className = 'quote-group';
+        group.dataset.key = data.key;
+        if (expandedQuoteGroups.has(data.key)) group.classList.add('is-open');
+
+        const title = `${data.chat.char} - ${data.chat.chatName}`;
+
+        const header = document.createElement('div');
+        header.className = 'quote-group-header';
+        header.title = title;
+        header.innerHTML = `
+            <div class="quote-group-title">
+                <span class="icon">❖</span>
+                <span class="quote-group-name"></span>
+            </div>
+            <div class="quote-group-meta">
+                <span class="quote-group-count"></span>
+                <i class="fa-solid fa-chevron-down quote-group-chevron"></i>
+            </div>
+        `;
+        header.querySelector('.quote-group-name').textContent = title;
+        header.querySelector('.quote-group-count').textContent = `${data.quotes.length} 条`;
+
+        const content = document.createElement('div');
+        content.className = 'quote-group-content';
+
+        group.appendChild(header);
+        group.appendChild(content);
+
+        panelGroupData.set(data.key, data);
+
+        // 收起的组一张卡片都不建；展开的组也只建第一批。
+        if (group.classList.contains('is-open')) {
+            content.dataset.built = '1';
+            appendQuoteCardChunk(content, data.quotes, 0, root);
+        }
+
+        return group;
+    }
+
+    function appendQuoteGroupChunk(list, groups, start, root) {
+        if (start >= groups.length) return;
+
+        const end = Math.min(groups.length, start + QUOTE_GROUP_HEADER_CHUNK);
+        const fragment = document.createDocumentFragment();
+
+        for (let index = start; index < end; index++) {
+            fragment.appendChild(createQuoteGroupElement(groups[index], root));
+        }
+        list.appendChild(fragment);
+
+        if (end >= groups.length) return;
+
+        const more = document.createElement('div');
+        more.className = 'quote-load-more';
+        more.textContent = '···';
+        list.appendChild(more);
+
+        observePanelSentinel(more, root, () => appendQuoteGroupChunk(list, groups, end, root));
+    }
+
+    function renderQuotes(force = false) {
         const list = document.getElementById('quote-list');
         if (!list) return;
 
-        list.innerHTML = '';
+        // 面板没开时不必浪费帧去建卡片；等下次打开时再按需渲染。
+        if (!force && !overlay.classList.contains('show')) return;
 
         const ctx = getChatContext();
         const chatInfo = getCurrentChatInfo();
-        hydrateLegacyQuotes(chatInfo, ctx);
+        ensureChatHydrated(chatInfo, ctx);
+
+        disconnectPanelObservers();
+        list.replaceChildren();
+        panelGroupData = new Map();
 
         if (activeQuoteTab === 'current') {
             if (!chatInfo.active) {
@@ -2168,7 +2935,7 @@ function setArchiveRenderLimit(value) {
                 return;
             }
 
-            quotes.forEach(quote => list.appendChild(createQuoteCard(quote, 'current', chatInfo)));
+            appendQuoteCardChunk(list, quotes, 0, list);
             return;
         }
 
@@ -2177,58 +2944,102 @@ function setArchiveRenderLimit(value) {
             return;
         }
 
-        // 按聊天分组；倒序遍历，让最近收录的聊天和句子排在最前
+        // 按聊天分组；倒序遍历，让最近收录的聊天和句子排在最前。
+        // 名字索引 / 当前聊天只取一次，避免每条收藏都重新查一遍角色表。
+        const liveIndex = getLiveChatNameIndex();
         const groups = new Map();
-        [...savedQuotes].reverse().forEach(quote => {
-            const chat = getQuoteChatInfo(quote);
-            if (!groups.has(chat.key)) {
-                groups.set(chat.key, { chat, quotes: [] });
+
+        for (let index = savedQuotes.length - 1; index >= 0; index--) {
+            const quote = savedQuotes[index];
+            const chat = getQuoteChatInfo(quote, { current: chatInfo, liveIndex });
+            let group = groups.get(chat.key);
+            if (!group) {
+                group = { key: chat.key, chat, quotes: [] };
+                groups.set(chat.key, group);
             }
-            groups.get(chat.key).quotes.push(quote);
-        });
+            group.quotes.push(quote);
+        }
 
         // 清理已经不存在的分组展开状态，避免新收藏的聊天组意外继承旧状态
         [...expandedQuoteGroups].forEach(key => {
             if (!groups.has(key)) expandedQuoteGroups.delete(key);
         });
 
-        groups.forEach(({ chat, quotes }) => {
-            const group = document.createElement('div');
-            group.className = 'quote-group';
-            if (expandedQuoteGroups.has(chat.key)) group.classList.add('is-open');
+        appendQuoteGroupChunk(list, [...groups.values()], 0, list);
+    }
 
-            const title = `${chat.char} - ${chat.chatName}`;
+    function activateQuoteInChat(quote) {
+        const mesid = String(quote.mesid ?? '');
+        const targetMes = mesid
+            ? document.querySelector(`.mes[mesid="${CSS.escape(mesid)}"]`)
+            : null;
 
-            const header = document.createElement('div');
-            header.className = 'quote-group-header';
-            header.title = title;
-            header.innerHTML = `
-                <div class="quote-group-title">
-                    <span class="icon">❖</span>
-                    <span class="quote-group-name"></span>
-                </div>
-                <div class="quote-group-meta">
-                    <span class="quote-group-count"></span>
-                    <i class="fa-solid fa-chevron-down quote-group-chevron"></i>
-                </div>
-            `;
-            header.querySelector('.quote-group-name').textContent = title;
-            header.querySelector('.quote-group-count').textContent = `${quotes.length} 条`;
+        // 划词收藏可能来自消息以外的文字（没有楼层号），这时改为打开详情而不是无声失败
+        if (!targetMes) {
+            showQuoteDetail(quote);
+            return;
+        }
 
-            header.addEventListener('click', () => {
-                const isOpen = group.classList.toggle('is-open');
-                if (isOpen) expandedQuoteGroups.add(chat.key);
-                else expandedQuoteGroups.delete(chat.key);
-            });
+        closeQuotePanel();
 
-            const content = document.createElement('div');
-            content.className = 'quote-group-content';
-            quotes.forEach(quote => content.appendChild(createQuoteCard(quote, 'all', chatInfo)));
+        // 等面板动画结束、DOM 重排完毕后再高亮
+        setTimeout(() => {
+            targetMes.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            targetMes.classList.remove('highlight-mes');
+            void targetMes.offsetWidth;
+            targetMes.classList.add('highlight-mes');
 
-            group.appendChild(header);
-            group.appendChild(content);
-            list.appendChild(group);
-        });
+            setTimeout(() => {
+                targetMes.classList.remove('highlight-mes');
+            }, 2000);
+        }, 300);
+    }
+
+    function handleQuoteListClick(event) {
+        const deleteBtn = event.target.closest('.quote-delete');
+        const card = event.target.closest('.quote-card');
+
+        if (deleteBtn) {
+            event.preventDefault();
+            event.stopPropagation();
+            const quote = card ? quoteCardMap.get(card) : null;
+            if (quote) deleteQuote(quote, card);
+            return;
+        }
+
+        const header = event.target.closest('.quote-group-header');
+        if (header) {
+            const groupEl = header.closest('.quote-group');
+            const key = groupEl?.dataset.key;
+            if (!groupEl || !key) return;
+
+            const isOpen = groupEl.classList.toggle('is-open');
+            if (isOpen) {
+                expandedQuoteGroups.add(key);
+                const content = groupEl.querySelector('.quote-group-content');
+                if (content && !content.dataset.built) {
+                    content.dataset.built = '1';
+                    const data = panelGroupData.get(key);
+                    const list = document.getElementById('quote-list');
+                    if (data && list) appendQuoteCardChunk(content, data.quotes, 0, list);
+                }
+            } else {
+                expandedQuoteGroups.delete(key);
+            }
+            return;
+        }
+
+        if (!card) return;
+
+        const quote = quoteCardMap.get(card);
+        if (!quote) return;
+
+        if (activeQuoteTab === 'all') {
+            showQuoteDetail(quote);
+            return;
+        }
+
+        activateQuoteInChat(quote);
     }
 
     function setQuoteTab(tab) {
@@ -2238,7 +3049,7 @@ function setArchiveRenderLimit(value) {
             button.classList.toggle('active', isActive);
             button.setAttribute('aria-selected', String(isActive));
         });
-        renderQuotes();
+        renderQuotes(true);
 
         const list = document.getElementById('quote-list');
         if (list) list.scrollTop = 0;
@@ -2272,7 +3083,6 @@ function setArchiveRenderLimit(value) {
     // ---- 收藏文字的下划线 ----
     const QUOTE_MARK_CLASS = 'quote-underline';
     const QUOTE_MARK_SELECTOR = '.mes_text .quote-underline';
-    let underlineBusy = false;
 
     function normalizeQuoteText(value) {
         return String(value ?? '')
@@ -2305,14 +3115,46 @@ function setArchiveRenderLimit(value) {
         return true;
     }
 
+    // 已归一化的收藏正文缓存：判断重复时不再把同一条长句反复压缩空格。
+    const quoteTextNormCache = new WeakMap();
+
+    function getNormalizedQuoteText(quote) {
+        if (!quote || typeof quote !== 'object') return '';
+        const text = String(quote.text ?? '');
+        const cached = quoteTextNormCache.get(quote);
+        if (cached && cached.text === text) return cached.norm;
+
+        const norm = normalizeQuoteText(text);
+        quoteTextNormCache.set(quote, { text, norm });
+        return norm;
+    }
+
+    // 只取“同一楼层”的收藏来判重：不再拿全场几千条收藏逐条比。
+    function getSelectionCandidates(payload, chatInfo) {
+        if (!payload || !chatInfo?.active) return [];
+
+        const mesid = String(payload.mes?.getAttribute('mesid') ?? '').trim();
+        if (!/^\d+$/.test(mesid)) return [];
+
+        const index = getQuoteIndexForChat(chatInfo, getChatContext());
+        const entry = index.byMesid.get(mesid);
+        const exact = entry ? entry.selections : [];
+        if (!index.looseSelections.length) return exact;
+
+        // 老数据没有 chatKey：数量通常很少，这里才做文本兜底
+        const loose = index.looseSelections.filter(quote => String(quote.mesid ?? '') === mesid);
+        return loose.length ? [...exact, ...loose] : exact;
+    }
+
     // 完全同一句（空白差异不算不同）—— 只用于「再点一次取消收录」
     function isSameSelectionQuote(quote, payload, chatInfo) {
         if (!isSelectionQuoteOfMessage(quote, payload, chatInfo)) return false;
-        return normalizeQuoteText(quote.text) === normalizeQuoteText(payload?.text);
+        return getNormalizedQuoteText(quote) === normalizeQuoteText(payload?.text);
     }
 
     function findSelectionMatches(payload, chatInfo) {
-        return savedQuotes.filter(quote => isSameSelectionQuote(quote, payload, chatInfo));
+        return getSelectionCandidates(payload, chatInfo)
+            .filter(quote => isSameSelectionQuote(quote, payload, chatInfo));
     }
 
     // 已收藏的更长语录里已经包含了这次选中的片段 → 不允许再存一条短的
@@ -2320,9 +3162,9 @@ function setArchiveRenderLimit(value) {
         const selection = normalizeQuoteText(payload?.text);
         if (!selection) return [];
 
-        return savedQuotes.filter(quote => {
+        return getSelectionCandidates(payload, chatInfo).filter(quote => {
             if (!isSelectionQuoteOfMessage(quote, payload, chatInfo)) return false;
-            const stored = normalizeQuoteText(quote.text);
+            const stored = getNormalizedQuoteText(quote);
             return stored.length > selection.length && stored.includes(selection);
         });
     }
@@ -2332,9 +3174,10 @@ function setArchiveRenderLimit(value) {
         const selection = normalizeQuoteText(payload?.text);
         if (!selection) return [];
 
-        return savedQuotes.filter(quote => {
+        const candidates = getSelectionCandidates(payload, chatInfo);
+        return candidates.filter(quote => {
             if (!isSelectionQuoteOfMessage(quote, payload, chatInfo)) return false;
-            const stored = normalizeQuoteText(quote.text);
+            const stored = getNormalizedQuoteText(quote);
             return stored.length > 0 && stored.length < selection.length && selection.includes(stored);
         });
     }
@@ -2436,69 +3279,337 @@ function setArchiveRenderLimit(value) {
         });
     }
 
-    function unwrapQuoteMark(mark) {
+    function unwrapQuoteMark(mark, options = {}) {
         const parent = mark?.parentNode;
         if (!parent) return;
 
         while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
         parent.removeChild(mark);
-        parent.normalize();
+        if (options.normalize !== false) parent.normalize();
     }
 
-    /**
-     * 让正文下划线与收藏列表保持一致：
-     * 有收藏但没线 → 补上；收藏被取消 / 切到别的聊天 / 消息重绘 → 去掉。
-     * 稳态下这里不碰任何 DOM，所以不会打断正在拖动的选区。
-     */
-    function applyQuoteUnderlines() {
-        if (underlineBusy) return;
-        underlineBusy = true;
+    // ==================================================
+    // 正文下划线：优先用浏览器原生 Highlight（零 DOM 节点）
+    // --------------------------------------------------
+    // 支持 CSS Custom Highlight API 的浏览器（Edge / Chrome 105+ / Safari 17.2+）：
+    // 把 Range 注册给浏览器，下划线由浏览器自己画。正文里一个 span 都不多，
+    // 不触发重排、不触发 MutationObserver，划多少条都不会拖慢滚动。
+    // 老浏览器自动退回“span 包裹”方案，同样只在消息进入视野时处理。
+    // ==================================================
+
+    const HIGHLIGHT_NAME = 'st-archive-quote';
+
+    let highlightMode = false;
+    let highlightRegistry = null;
+    let highlightRangesByMesid = new Map();
+    let underlineWriteDepth = 0;
+    let underlineWriteAll = false;
+    const underlineWriteRoots = new Set();
+
+    try {
+        if (typeof Highlight === 'function'
+            && typeof CSS !== 'undefined'
+            && CSS.highlights
+            && typeof CSS.highlights.set === 'function') {
+            highlightRegistry = new Highlight();
+            CSS.highlights.set(HIGHLIGHT_NAME, highlightRegistry);
+            highlightMode = true;
+        }
+    } catch (error) {
+        highlightMode = false;
+        highlightRegistry = null;
+    }
+
+    if (!highlightMode) {
+        console.info('[ST-档案馆] 当前浏览器不支持 CSS Highlight，已回退到普通下划线模式');
+    }
+
+    function withUnderlineWrite(callback, mes = null, all = false) {
+        underlineWriteDepth++;
+        if (mes) underlineWriteRoots.add(mes);
+        if (all) underlineWriteAll = true;
 
         try {
-            const chatInfo = getCurrentChatInfo();
-            const wanted = new Map();
-
-            getCurrentSelectionQuotes(chatInfo).forEach(quote => {
-                const key = archiveQuoteKey(quote);
-                if (key && !wanted.has(key)) wanted.set(key, quote);
-            });
-
-            // 1. 拆掉不该存在的线
-            document.querySelectorAll(QUOTE_MARK_SELECTOR).forEach(mark => {
-                const key = mark.getAttribute('data-quote-key') || '';
-                if (!wanted.has(key)) unwrapQuoteMark(mark);
-            });
-
-            if (!wanted.size) return;
-
-            // 2. 补上缺的线；长句优先，避免短句先占位把长句的匹配切断
-            const existing = new Set(
-                Array.from(document.querySelectorAll(QUOTE_MARK_SELECTOR))
-                    .map(mark => mark.getAttribute('data-quote-key') || '')
-            );
-
-            const pending = Array.from(wanted.entries())
-                .filter(([key]) => !existing.has(key))
-                .sort((a, b) => String(b[1].text || '').length - String(a[1].text || '').length);
-
-            pending.forEach(([key, quote]) => {
-                const mesid = String(quote.mesid ?? '');
-                if (!/^\d+$/.test(mesid)) return;
-
-                const container = document.querySelector(`.mes[mesid="${CSS.escape(mesid)}"] .mes_text`);
-                if (!container) return;
-
-                const map = buildMessageTextMap(container);
-                const range = findQuoteTextRange(map, quote.text);
-                if (!range) return;
-
-                wrapQuoteTextRange(map, range.start, range.end, key);
-            });
-        } catch (error) {
-            console.warn('[ST-档案馆] 绘制收藏下划线失败', error);
+            return callback();
         } finally {
-            underlineBusy = false;
+            // MutationObserver 的回调是微任务，排在这个微任务前面，能看到写入标记
+            queueMicrotask(() => {
+                underlineWriteDepth = Math.max(0, underlineWriteDepth - 1);
+                if (mes) underlineWriteRoots.delete(mes);
+                if (all) underlineWriteAll = false;
+            });
         }
+    }
+
+    // 这一条 DOM 变化是不是“我们自己补下划线”造成的？
+    // 只忽略自己改的那条消息，同一批里酒馆真正的更新照常处理，不会漏。
+    function isOwnUnderlineMutation(record) {
+        if (underlineWriteDepth <= 0) return false;
+        if (underlineWriteAll) return true;
+        const host = closestMesNode(record.target);
+        return Boolean(host && underlineWriteRoots.has(host));
+    }
+
+    function startEntryAt(map, offset) {
+        const nodes = map.nodes;
+        let low = 0;
+        let high = nodes.length - 1;
+        let best = 0;
+
+        while (low <= high) {
+            const mid = (low + high) >> 1;
+            if (nodes[mid].start <= offset) {
+                best = mid;
+                low = mid + 1;
+            } else {
+                high = mid - 1;
+            }
+        }
+
+        let entry = nodes[best];
+        let index = best;
+        while (entry && offset >= entry.end && index + 1 < nodes.length) {
+            index++;
+            entry = nodes[index];
+        }
+        return entry;
+    }
+
+    function endEntryAt(map, offset) {
+        const nodes = map.nodes;
+        let low = 0;
+        let high = nodes.length - 1;
+        let best = -1;
+
+        // 结束位置取“起点严格小于 offset”的那个节点：
+        // 这样 offset 刚好落在两个文本节点交界处时，不会把整段线截掉。
+        while (low <= high) {
+            const mid = (low + high) >> 1;
+            if (nodes[mid].start < offset) {
+                best = mid;
+                low = mid + 1;
+            } else {
+                high = mid - 1;
+            }
+        }
+        return best >= 0 ? nodes[best] : null;
+    }
+
+    function createRangeFromOffsets(map, start, end) {
+        if (!map?.nodes?.length || !(end > start)) return null;
+
+        const startEntry = startEntryAt(map, start);
+        const endEntry = endEntryAt(map, end);
+        if (!startEntry || !endEntry) return null;
+
+        const startOffset = Math.max(0, Math.min(start - startEntry.start, startEntry.node.nodeValue.length));
+        const endOffset = Math.max(0, Math.min(end - endEntry.start, endEntry.node.nodeValue.length));
+
+        const range = document.createRange();
+        try {
+            range.setStart(startEntry.node, startOffset);
+            range.setEnd(endEntry.node, endOffset);
+        } catch (error) {
+            return null;
+        }
+        return range;
+    }
+
+    function removeUnderlinesForMessage(mes) {
+        const mesid = String(mes.getAttribute('mesid') ?? '').trim();
+
+        if (highlightMode) {
+            const ranges = highlightRangesByMesid.get(mesid);
+            if (!ranges) return;
+            ranges.forEach(record => {
+                try { highlightRegistry.delete(record.range); } catch (error) { /* 忽略 */ }
+            });
+            highlightRangesByMesid.delete(mesid);
+            return;
+        }
+
+        const container = mes.querySelector('.mes_text');
+        if (!container) return;
+        const marks = container.querySelectorAll(`.${QUOTE_MARK_CLASS}`);
+        if (!marks.length) return;
+
+        withUnderlineWrite(() => {
+            marks.forEach(mark => unwrapQuoteMark(mark, { normalize: false }));
+            container.normalize();
+        }, mes);
+    }
+
+    function clearAllUnderlines() {
+        if (highlightMode) {
+            highlightRangesByMesid.forEach(ranges => {
+                ranges.forEach(record => {
+                    try { highlightRegistry.delete(record.range); } catch (error) { /* 忽略 */ }
+                });
+            });
+            highlightRangesByMesid = new Map();
+            return;
+        }
+
+        const marks = document.querySelectorAll(QUOTE_MARK_SELECTOR);
+        if (!marks.length) return;
+
+        const containers = new Set();
+        withUnderlineWrite(() => {
+            marks.forEach(mark => {
+                const parent = mark.parentNode;
+                if (!parent) return;
+                const container = parent.closest?.('.mes_text') || parent;
+                if (container instanceof Element) containers.add(container);
+                unwrapQuoteMark(mark, { normalize: false });
+            });
+            containers.forEach(container => container.normalize());
+        }, null, true);
+    }
+
+    function syncUnderlinesForMessage(mes, quotes) {
+        const mesid = String(mes.getAttribute('mesid') ?? '').trim();
+        if (!mesid) return;
+
+        const wanted = new Map();
+        quotes.forEach(quote => {
+            const key = archiveQuoteKey(quote);
+            if (key && !wanted.has(key)) wanted.set(key, quote);
+        });
+
+        if (highlightMode) {
+            syncHighlightRanges(mes, mesid, wanted);
+            return;
+        }
+
+        const container = mes.querySelector('.mes_text');
+        if (!container) return;
+
+        withUnderlineWrite(() => {
+            // 1) 先拆掉不应存在的线 / 重复的线
+            const seen = new Set();
+            container.querySelectorAll(`.${QUOTE_MARK_CLASS}`).forEach(mark => {
+                const key = mark.getAttribute('data-quote-key') || '';
+                if (!wanted.has(key) || seen.has(key)) {
+                    unwrapQuoteMark(mark, { normalize: false });
+                } else {
+                    seen.add(key);
+                }
+            });
+
+            const missing = [];
+            wanted.forEach((quote, key) => {
+                if (!seen.has(key)) missing.push({ key, quote });
+            });
+
+            // 2) 一次性把正文串成文本，再把所有区间找出来，从后往前包 span。
+            //    这样一条消息只扫一遍，不会“一条收藏扫一遍”。
+            if (missing.length) {
+                const map = buildMessageTextMap(container);
+                const found = [];
+
+                missing.forEach(({ key, quote }) => {
+                    const range = findQuoteTextRange(map, quote.text);
+                    if (range) found.push({ key, start: range.start, end: range.end });
+                });
+
+                found.sort((a, b) => b.start - a.start);
+                found.forEach(range => wrapQuoteTextRange(map, range.start, range.end, range.key));
+            }
+
+            // 3) 整条消息只 normalize 一次（旧版每条线都 normalize 一次，数量一多就是平方级）
+            container.normalize();
+        }, mes);
+    }
+
+    function syncHighlightRanges(mes, mesid, wanted) {
+        const container = mes.querySelector('.mes_text');
+        if (!container) {
+            removeUnderlinesForMessage(mes);
+            return;
+        }
+
+        let ranges = highlightRangesByMesid.get(mesid);
+
+        // 消息被酒馆重绘过：旧 Range 指向已经消失的节点，全部作废重来
+        if (ranges && ranges._container !== container) {
+            removeUnderlinesForMessage(mes);
+            ranges = null;
+        }
+
+        if (ranges) {
+            ranges.forEach((record, key) => {
+                if (wanted.has(key)) return;
+                try { highlightRegistry.delete(record.range); } catch (error) { /* 忽略 */ }
+                ranges.delete(key);
+            });
+        }
+
+        if (!wanted.size) {
+            if (ranges && !ranges.size) highlightRangesByMesid.delete(mesid);
+            return;
+        }
+
+        if (!ranges) {
+            ranges = new Map();
+            ranges._container = container;
+            highlightRangesByMesid.set(mesid, ranges);
+        }
+
+        let map = null;
+        wanted.forEach((quote, key) => {
+            if (ranges.has(key)) return;
+            if (!map) map = buildMessageTextMap(container);
+
+            const found = findQuoteTextRange(map, quote.text);
+            if (!found) return;
+
+            const range = createRangeFromOffsets(map, found.start, found.end);
+            if (!range) return;
+
+            try {
+                highlightRegistry.add(range);
+                ranges.set(key, { range });
+            } catch (error) {
+                // 跨 shadow root 等极端情况：跳过这一条，不影响其它收藏
+            }
+        });
+
+        if (!ranges.size) highlightRangesByMesid.delete(mesid);
+    }
+
+    // 点划线时反查：这个坐标落在哪一条收藏的 Range 里？
+    function findQuoteKeyAtPoint(mesid, node, offset) {
+        const ranges = highlightRangesByMesid.get(mesid);
+        if (!ranges) return '';
+
+        for (const [key, record] of ranges) {
+            try {
+                if (record.range.comparePoint(node, offset) === 0) return key;
+                // 点在句尾边界时补测前一个字符，避免“明明点到了却没反应”
+                if (offset > 0 && record.range.comparePoint(node, offset - 1) === 0) return key;
+            } catch (error) {
+                // Range 已失效，忽略
+            }
+        }
+        return '';
+    }
+
+    function selectQuoteRange(range) {
+        try {
+            const selection = window.getSelection();
+            if (!selection) return;
+            selection.removeAllRanges();
+            selection.addRange(range.cloneRange());
+        } catch (error) {
+            console.warn('[ST-档案馆] 选中已收藏句子失败', error);
+        }
+    }
+
+    // 兼容旧调用：只在需要时重算可见消息，不再做全场扫描。
+    function applyQuoteUnderlines() {
+        visibleMessages.forEach(mes => {
+            if (mes.isConnected) scheduleMessageSync(mes);
+        });
     }
 
     const selectionBtn = document.createElement('div');
@@ -2667,6 +3778,11 @@ function setArchiveRenderLimit(value) {
         }
     }
 
+    function syncSelectionMessage(mes) {
+        if (mes) scheduleMessageSync(mes);
+        else refreshAllSynced();
+    }
+
     function commitSelectionQuote() {
         const payload = selectionPayload;
         if (!payload) return;
@@ -2680,8 +3796,7 @@ function setArchiveRenderLimit(value) {
             savedQuotes = savedQuotes.filter(quote => !matches.includes(quote));
             saveQuotes();
             renderQuotes();
-            injectBookmarks();
-            applyQuoteUnderlines();
+            syncSelectionMessage(mes);
 
             showArchiveToast('info', '已取消收录');
             hideSelectionBtn({ clear: true });
@@ -2704,8 +3819,7 @@ function setArchiveRenderLimit(value) {
 
             saveQuotes();
             renderQuotes();
-            injectBookmarks();
-            applyQuoteUnderlines();
+            syncSelectionMessage(mes);
 
             showArchiveToast('success', `已升级为更长的一段（${payload.text.length} 字）`);
             hideSelectionBtn({ clear: true });
@@ -2729,7 +3843,8 @@ function setArchiveRenderLimit(value) {
         );
 
         const targetText = normalizeForCompare(payload.text);
-        const duplicate = savedQuotes.some(quote => (
+        // 只在“同一楼层”的候选里判重，不再把全场收藏扫一遍
+        const duplicate = getSelectionCandidates(payload, chatInfo).some(quote => (
             String(quote.mesid ?? '') === mesid
             && quote.char === charName
             && String(quote.chatKey ?? '') === String(chatInfo.key ?? '')
@@ -2757,7 +3872,7 @@ function setArchiveRenderLimit(value) {
 
         saveQuotes();
         renderQuotes();
-        injectBookmarks();
+        syncSelectionMessage(mes);
 
         showArchiveToast('success', `已收录 ${payload.text.length} 字`);
         hideSelectionBtn({ clear: true });
@@ -2838,7 +3953,58 @@ function setArchiveRenderLimit(value) {
 
     // 点一下已划线的句子：只把它选起来，交给悬浮书签做二次确认，绝不直接删除。
     // 用捕获阶段接管，避免这一下点击被消息层的其它事件吃掉。
+    function caretFromPoint(event) {
+        try {
+            if (typeof document.caretRangeFromPoint === 'function') {
+                return document.caretRangeFromPoint(event.clientX, event.clientY);
+            }
+            if (typeof document.caretPositionFromPoint === 'function') {
+                const position = document.caretPositionFromPoint(event.clientX, event.clientY);
+                if (!position) return null;
+                return { startContainer: position.offsetNode, startOffset: position.offset };
+            }
+        } catch (error) {
+            // 忽略：坐标可能落在不可放置光标的位置
+        }
+        return null;
+    }
+
     document.addEventListener('click', (event) => {
+        // 新版：正文里没有 span，按“点击坐标落在哪个 Range 里”反查。
+        // 这样既能点划线选中，又不需要往正文塞任何节点。
+        if (highlightMode) {
+            if (typeof event.button === 'number' && event.button !== 0) return;
+
+            const target = event.target;
+            if (!(target instanceof Element)) return;
+            if (target.closest('a, button, input, textarea, select, .mes_buttons, #quote-fab, #quote-selection-btn, #quote-overlay, #quote-detail-overlay')) {
+                return;
+            }
+
+            const textEl = target.closest('.mes_text');
+            if (!textEl) return;
+
+            const mes = textEl.closest('.mes');
+            const mesid = String(mes?.getAttribute('mesid') ?? '').trim();
+            if (!mesid) return;
+
+            const caret = caretFromPoint(event);
+            if (!caret || !textEl.contains(caret.startContainer)) return;
+
+            const key = findQuoteKeyAtPoint(mesid, caret.startContainer, caret.startOffset);
+            if (!key) return;
+
+            const record = highlightRangesByMesid.get(mesid)?.get(key);
+            if (!record) return;
+
+            event.preventDefault();
+            event.stopPropagation();
+            selectQuoteRange(record.range);
+            scheduleSelectionCheck(20);
+            return;
+        }
+
+        // 旧浏览器回退路径：正文里是真正的 span，直接找最近的划线节点。
         const mark = event.target?.closest?.('.mes_text .quote-underline');
         if (!mark) return;
 
@@ -2903,7 +4069,7 @@ function setArchiveRenderLimit(value) {
 
         const ctx = getChatContext();
         const chatInfo = getCurrentChatInfo();
-        const isSaved = messageHasQuote(mesid, charName, chatInfo, ctx);
+        const isSaved = isMessageBookmarked(mesid, charName, chatInfo, ctx);
 
         if (isSaved) {
             savedQuotes = savedQuotes.filter(q => !(
@@ -2945,7 +4111,7 @@ function setArchiveRenderLimit(value) {
 
         saveQuotes();
         renderQuotes();
-        applyQuoteUnderlines();
+        scheduleMessageSync(mes);
     });
 
     // 5. 悬浮窗事件
@@ -2957,8 +4123,9 @@ function setArchiveRenderLimit(value) {
 
         // 打开面板时强制刷新一次最近聊天名字索引，避免别处刚改过名还显示旧名字
         invalidateLiveChatNameCache();
-        setQuoteTab('current');
+        // 先让面板可见，再渲染：renderQuotes 会跳过“关着的面板”，避免白干活
         overlay.classList.add('show');
+        setQuoteTab('current');
     });
 
     panel.querySelector('.quote-close').addEventListener('click', closeQuotePanel);
@@ -2967,6 +4134,10 @@ function setArchiveRenderLimit(value) {
     panel.querySelectorAll('.quote-tab').forEach(button => {
         button.addEventListener('click', () => setQuoteTab(button.getAttribute('data-tab')));
     });
+
+    // 面板只挂一个点击监听：卡片、删除、分组展开都由它分发。
+    // 哪怕面板里已经加载了上千张卡片，也不会多出几千个监听器。
+    document.getElementById('quote-list')?.addEventListener('click', handleQuoteListClick);
 
     overlay.addEventListener('click', (e) => {
         if (e.target === overlay) closeQuotePanel();
@@ -2996,6 +4167,7 @@ function setArchiveRenderLimit(value) {
     (function makeDraggable(el) {
         let isDragging = false, hasMoved = false;
         let startX, startY, initialLeft, initialTop;
+
         const savedPos = readLocalStorageJson(ARCHIVE_LEGACY_KEYS.fabPos, null);
         if (savedPos && typeof savedPos.left === 'number' && typeof savedPos.top === 'number') {
             el.style.left = savedPos.left + 'px'; el.style.top = savedPos.top + 'px';
@@ -3003,46 +4175,74 @@ function setArchiveRenderLimit(value) {
             el.style.left = '20px'; el.style.top = '120px';
         }
 
-        const startDrag = (e) => {
-            if (e.type === 'mousedown') e.preventDefault();
-            isDragging = true; hasMoved = false;
-            const clientX = e.type.includes('mouse') ? e.clientX : e.touches[0].clientX;
-            const clientY = e.type.includes('mouse') ? e.clientY : e.touches[0].clientY;
-            startX = clientX; startY = clientY;
-            initialLeft = el.offsetLeft; initialTop = el.offsetTop;
-        };
-
         const onDrag = (e) => {
             if (!isDragging) return;
-            const clientX = e.type.includes('mouse') ? e.clientX : e.touches[0].clientX;
-            const clientY = e.type.includes('mouse') ? e.clientY : e.touches[0].clientY;
-            let dx = clientX - startX, dy = clientY - startY;
+
+            const touch = e.touches && e.touches[0];
+            const clientX = e.type.startsWith('mouse') ? e.clientX : touch?.clientX;
+            const clientY = e.type.startsWith('mouse') ? e.clientY : touch?.clientY;
+            if (clientX === undefined || clientY === undefined) return;
+
+            const dx = clientX - startX;
+            const dy = clientY - startY;
+
             if (Math.abs(dx) > 4 || Math.abs(dy) > 4) {
                 hasMoved = true;
-                if (e.type.includes('touch') && e.cancelable) e.preventDefault();
+                if (e.type === 'touchmove' && e.cancelable) e.preventDefault();
             }
-            let newLeft = initialLeft + dx, newTop = initialTop + dy;
+
+            let newLeft = initialLeft + dx;
+            let newTop = initialTop + dy;
             const maxLeft = window.innerWidth - el.offsetWidth;
             const maxTop = window.innerHeight - el.offsetHeight;
-            if (newLeft < 0) newLeft = 0; if (newLeft > maxLeft) newLeft = maxLeft;
-            if (newTop < 0) newTop = 0; if (newTop > maxTop) newTop = maxTop;
-            el.style.left = newLeft + 'px'; el.style.top = newTop + 'px';
+            if (newLeft < 0) newLeft = 0;
+            if (newLeft > maxLeft) newLeft = maxLeft;
+            if (newTop < 0) newTop = 0;
+            if (newTop > maxTop) newTop = maxTop;
+            el.style.left = newLeft + 'px';
+            el.style.top = newTop + 'px';
         };
 
         const endDrag = () => {
             if (!isDragging) return;
             isDragging = false;
+
+            // 只在拖动期间挂 move 监听。平时 document 上没有任何 touchmove，
+            // 手机的滚动就不会被 JS 拦下来等结果——这是移动端不卡的关键之一。
+            document.removeEventListener('mousemove', onDrag);
+            document.removeEventListener('mouseup', endDrag);
+            document.removeEventListener('touchmove', onDrag);
+            document.removeEventListener('touchend', endDrag);
+
             if (hasMoved) {
                 writeLocalStorageJson(ARCHIVE_LEGACY_KEYS.fabPos, { left: el.offsetLeft, top: el.offsetTop });
             }
         };
 
+        const startDrag = (e) => {
+            if (isDragging) return;
+            if (e.type === 'mousedown') e.preventDefault();
+
+            const touch = e.touches && e.touches[0];
+            const clientX = e.type === 'mousedown' ? e.clientX : touch?.clientX;
+            const clientY = e.type === 'mousedown' ? e.clientY : touch?.clientY;
+            if (clientX === undefined || clientY === undefined) return;
+
+            isDragging = true;
+            hasMoved = false;
+            startX = clientX;
+            startY = clientY;
+            initialLeft = el.offsetLeft;
+            initialTop = el.offsetTop;
+
+            document.addEventListener('mousemove', onDrag);
+            document.addEventListener('mouseup', endDrag);
+            document.addEventListener('touchmove', onDrag, { passive: false });
+            document.addEventListener('touchend', endDrag);
+        };
+
         el.addEventListener('mousedown', startDrag);
-        document.addEventListener('mousemove', onDrag);
-        document.addEventListener('mouseup', endDrag);
         el.addEventListener('touchstart', startDrag, { passive: false });
-        document.addEventListener('touchmove', onDrag, { passive: false });
-        document.addEventListener('touchend', endDrag);
         el.addEventListener('click', (e) => {
             if (hasMoved) {
                 e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
@@ -3051,6 +4251,6 @@ function setArchiveRenderLimit(value) {
         }, true);
     })(fab);
 
-    // 7. 启动定时器
-    setInterval(injectBookmarks, 1000);
+    // 7. 启动同步引擎：事件驱动 + 只处理可见消息，不再有每秒全量扫描
+    startQuoteRuntime();
 })();

@@ -557,3 +557,132 @@ body:has(#chat .welcomePanel) #chat > div.mes[mesid="0"][ch_name="Assistant"] { 
 @keyframes archiveLimitIn {
     to { transform: translateY(0) scale(1); }
 }
+
+/* ==================================================
+   v1.3.0 性能版
+   1) 原生 Highlight 下划线：正文零节点，划几千条也不触发重排
+   2) 首页档案行 / 拾遗卡片的分批加载
+   3) 屏幕外的行跳过排版与绘制
+   ================================================== */
+
+/* 只有支持 CSS Custom Highlight API 的浏览器会用到这一段。
+   下划线由浏览器直接绘制，不往正文里插任何 span，所以不会拖累滚动和选区。 */
+::highlight(st-archive-quote) {
+    color: inherit;
+    background-color: rgba(164, 80, 80, 0.06);
+    text-decoration-line: underline;
+    text-decoration-color: rgba(164, 80, 80, 0.75);
+    text-decoration-thickness: 1.5px;
+    text-underline-offset: 3px;
+}
+
+/* 首页档案行：不再依赖每个元素上的内联样式，改由一条 CSS 统一管理 */
+.archive-chat-row {
+    display: flex !important;
+    align-items: center !important;
+    width: 100% !important;
+    padding: 10px 16px !important;
+    box-sizing: border-box !important;
+    border-bottom: 1px solid rgba(120, 120, 120, 0.2) !important;
+    background: transparent;
+    cursor: pointer;
+    /* 屏幕外的行不参与排版/绘制；长列表滚动只处理看得见的部分 */
+    content-visibility: auto;
+    contain-intrinsic-size: auto 61px;
+}
+.archive-chat-row:hover {
+    background: rgba(128, 128, 128, 0.1) !important;
+}
+.archive-chat-row.is-pinned-row {
+    background: rgba(128, 128, 128, 0.08) !important;
+}
+.archive-avatar {
+    width: 40px;
+    height: 40px;
+    border-radius: 6px;
+    margin-right: 12px;
+    object-fit: cover;
+    flex-shrink: 0;
+}
+.archive-chat-main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+.archive-chat-top,
+.archive-chat-bottom {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    width: 100%;
+    min-width: 0;
+}
+.archive-chat-bottom {
+    margin-top: 6px;
+}
+.archive-chat-title {
+    flex: 1;
+    min-width: 0;
+    font-size: 14px;
+    color: var(--SmartThemeBodyColor);
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-family: 'Noto Serif SC', 'Songti SC', 'SimSun', serif;
+    letter-spacing: 1px;
+}
+.archive-chat-actions {
+    display: flex;
+    gap: 10px;
+    flex-shrink: 0;
+    margin-left: 10px;
+    opacity: 0.5;
+    transition: opacity 0.2s;
+}
+.archive-chat-row:hover .archive-chat-actions {
+    opacity: 1;
+}
+.archive-chat-actions i {
+    color: color-mix(in srgb, var(--SmartThemeBodyColor) 40%, transparent);
+    cursor: pointer;
+}
+.archive-chat-date {
+    font-size: 11px;
+    color: color-mix(in srgb, var(--SmartThemeBodyColor) 50%, transparent);
+    font-family: 'Courier New', Courier, monospace;
+}
+.archive-chat-stats {
+    font-size: 11px;
+    color: color-mix(in srgb, var(--SmartThemeBodyColor) 50%, transparent);
+    transform: scale(0.9);
+    transform-origin: right center;
+    font-family: 'Courier New', Courier, monospace;
+}
+
+/* “载入更多”哨兵：滚动到它附近才会继续建下一批，首屏永远只处理一小段 */
+.archive-load-more,
+.quote-load-more {
+    display: block;
+    width: 100%;
+    padding: 10px 0;
+    border: 0;
+    background: transparent;
+    color: color-mix(in srgb, var(--SmartThemeBodyColor) 35%, transparent);
+    font-family: 'Courier New', Courier, monospace;
+    letter-spacing: 2px;
+    text-align: center;
+    cursor: pointer;
+}
+.archive-load-more {
+    font-size: 11px;
+}
+.quote-load-more {
+    font-size: 12px;
+    opacity: 0.55;
+}
+.archive-load-more:hover,
+.quote-load-more:hover {
+    color: #a45050;
+}
