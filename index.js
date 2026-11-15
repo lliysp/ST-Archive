@@ -343,7 +343,7 @@ function setArchiveRenderLimit(value) {
 })();
 
 (function () {
-    console.log("✨ [ST-档案馆] v1.3.0 性能版已启动！");
+    console.log("✨ [ST-档案馆] v1.4.0 检索版已启动！");
 
     function escapeHtml(value) {
         return String(value ?? '').replace(/[&<>"']/g, char => ({
@@ -1161,7 +1161,7 @@ function setArchiveRenderLimit(value) {
 
 
 (function () {
-    console.log("📚 [ST-档案馆] 拾遗模块已加载（v1.3.0）！");
+    console.log("📚 [ST-档案馆] 拾遗模块已加载（v1.4.0）！");
 
     if (document.getElementById('quote-fab')) return;
 
@@ -1310,9 +1310,8 @@ function setArchiveRenderLimit(value) {
         const message = ctx.chat?.[Number(quote.mesid)];
         if (!message) return false;
 
-        const messageName = normalizeCharName(message.name || '');
-        if (quote.char && quote.char !== '未知角色' && messageName !== quote.char) return false;
-
+        // 老数据没有 chatKey，只靠“楼层号 + 正文”认领；不再比对角色名，
+        // 否则角色改名后，旧收藏会因为 message.name 变了而认不回来。
         const stored = normalizeForCompare(quote.text).replace(/(?:\.\.\.|…)$/u, '').trim();
         const actual = normalizeForCompare(message.mes);
         if (!stored || !actual) return false;
@@ -1395,7 +1394,8 @@ function setArchiveRenderLimit(value) {
             console.warn('[ST-档案馆] 解析角色/群实时名称失败', error);
         }
 
-        liveCharNameCache.set(key, resolved);
+        // 查不到就先不缓存：角色列表可能还没重新加载完，下次调用再试
+        if (resolved) liveCharNameCache.set(key, resolved);
         return resolved || fallback;
     }
 
@@ -1531,16 +1531,144 @@ function setArchiveRenderLimit(value) {
         }
     }
 
+    function getQuoteScope(quote) {
+        const storedScope = String(quote?.scope || '').trim();
+        if (storedScope) return storedScope;
+        return splitChatKey(quote?.chatKey).scope;
+    }
+
+    // 角色改名时，酒馆会把头像文件一起改名，scope 从 char:旧头像 变成 char:新头像。
+    // 这里只做一层收藏遍历 + 单次字符串比较（O(1)），不会出现“角色表 × 收藏表”的双层循环。
+    function handleCharacterRenamed(oldAvatar, newAvatar) {
+        const oldId = String(oldAvatar || '').trim();
+        const newId = String(newAvatar || '').trim();
+        if (!oldId || !newId) return;
+
+        const oldScope = `char:${oldId}`;
+        const newScope = `char:${newId}`;
+        let changed = false;
+
+        if (oldScope !== newScope) {
+            savedQuotes.forEach(quote => {
+                const storedScope = String(quote.scope || '').trim();
+                const keyParts = splitChatKey(quote.chatKey);
+
+                // scope 或 chatKey 任意一个还是旧头像，就一起迁移
+                if (storedScope !== oldScope && keyParts.scope !== oldScope) return;
+
+                quote.scope = newScope;
+                if (quote.chatKey) quote.chatKey = `${newScope}::${keyParts.chatId}`;
+                changed = true;
+            });
+        }
+
+        if (changed) {
+            saveQuotes();
+            runtimeChatKey = '';
+            refreshAllSynced();
+        }
+
+        invalidateLiveChatNameCache();
+
+        // 酒馆是“先发事件、后重新拉角色列表”，所以等一下再刷新面板，
+        // 让全部聊天里的 char 显示新名字，而不是事件瞬间的旧名字。
+        const refreshRenamedView = (retry) => {
+            invalidateLiveChatNameCache();
+
+            const newName = getLiveCharName(newScope, '');
+            if (newName) {
+                let nameChanged = false;
+                savedQuotes.forEach(quote => {
+                    if (String(quote.scope || '') !== newScope) return;
+                    if (quote.chatChar !== newName) {
+                        quote.chatChar = newName;
+                        nameChanged = true;
+                    }
+                });
+                if (nameChanged) saveQuotes();
+            }
+
+            if (overlay.classList.contains('show')) renderQuotes(true);
+            if (changed) refreshAllSynced();
+
+            // 角色列表如果还没回来，再等一次；正常情况第一次就命中
+            if (!newName && retry) {
+                setTimeout(() => refreshRenamedView(false), 1200);
+            }
+        };
+
+        setTimeout(() => refreshRenamedView(true), 700);
+    }
+
+    // 删除角色后的孤儿收藏清理：先把要删的 scope 收进 Set，
+    // 再单层遍历收藏、用 Set.has 做 O(1) 命中。禁止双层循环。
+    const pendingDeletedScopes = new Set();
+    let orphanCleanupScheduled = false;
+
+    function queueOrphanScopeCleanup(scope) {
+        if (!scope) return;
+        pendingDeletedScopes.add(scope);
+
+        if (orphanCleanupScheduled) return;
+        orphanCleanupScheduled = true;
+
+        setTimeout(() => {
+            orphanCleanupScheduled = false;
+            flushOrphanScopeCleanup();
+        }, 0);
+    }
+
+    function flushOrphanScopeCleanup() {
+        if (!pendingDeletedScopes.size) return;
+
+        const deletedScopes = new Set(pendingDeletedScopes);
+        pendingDeletedScopes.clear();
+
+        const before = savedQuotes.length;
+        savedQuotes = savedQuotes.filter(quote => {
+            if (deletedScopes.has(getQuoteScope(quote))) return false;
+            // scope 万一和 chatKey 不一致，再按 chatKey 的前缀判一次；仍是 O(1) Set 命中
+            if (quote.chatKey && deletedScopes.has(splitChatKey(quote.chatKey).scope)) return false;
+            return true;
+        });
+        if (savedQuotes.length === before) return;
+
+        saveQuotes();
+        invalidateLiveChatNameCache();
+
+        if (overlay.classList.contains('show')) renderQuotes(true);
+        refreshAllSynced();
+    }
+
+    function handleCharacterDeleted(eventData) {
+        const data = eventData?.detail && typeof eventData.detail === 'object' ? eventData.detail : eventData;
+        const character = data?.character || data;
+        const avatar = String(character?.avatar || data?.avatar || '').trim();
+        if (!avatar) return;
+
+        queueOrphanScopeCleanup(`char:${avatar}`);
+    }
+
     function bindChatRenameListener() {
         try {
             const ctx = getChatContext();
             const eventSource = ctx?.eventSource;
             const eventTypes = ctx?.eventTypes || ctx?.event_types;
-            if (eventSource?.on && eventTypes?.CHAT_RENAMED) {
+
+            if (!eventSource?.on || !eventTypes) return;
+
+            if (eventTypes.CHAT_RENAMED) {
                 eventSource.on(eventTypes.CHAT_RENAMED, handleChatRenamed);
             }
-            // 角色/群改名后，拾遗里显示的实时名字也要跟着换
-            [eventTypes?.CHARACTER_RENAMED, eventTypes?.GROUP_UPDATED, eventTypes?.CHARACTER_EDITED]
+            if (eventTypes.CHARACTER_RENAMED) {
+                eventSource.on(eventTypes.CHARACTER_RENAMED, handleCharacterRenamed);
+            }
+            if (eventTypes.CHARACTER_DELETED) {
+                eventSource.on(eventTypes.CHARACTER_DELETED, handleCharacterDeleted);
+            }
+
+            // 群/角色其它编辑后，拾遗里显示的实时名字也要跟着换
+            [eventTypes.GROUP_UPDATED, eventTypes.CHARACTER_EDITED]
                 .filter(Boolean)
                 .forEach(type => eventSource.on(type, invalidateLiveChatNameCache));
         } catch (error) {
@@ -1552,17 +1680,6 @@ function setArchiveRenderLimit(value) {
     // 楼层书签只代表“整层已收录”，不能被划词收藏点亮，取消时也不能误删划词记录。
     function isWholeMessageQuote(quote) {
         return Boolean(quote) && quote.source !== 'selection';
-    }
-
-    function messageHasQuote(mesid, charName, chatInfo, ctx) {
-        if (!chatInfo?.active) return false;
-
-        return savedQuotes.some(quote => {
-            if (!isWholeMessageQuote(quote)) return false;
-            if (String(quote.mesid) !== String(mesid) || quote.char !== charName) return false;
-            if (quote.chatKey) return quote.chatKey === chatInfo.key;
-            return quoteMatchesCurrentChat(quote, chatInfo, ctx);
-        });
     }
 
     // 1. 注入 CSS 样式
@@ -1646,6 +1763,124 @@ function setArchiveRenderLimit(value) {
             box-shadow: none; transition: color 0.2s, background 0.2s;
         }
         #quote-panel .quote-close:hover { color: #8b3a3a; background: rgba(164, 80, 80, 0.08); }
+
+        /* 拾遗检索：搜索和排序/筛选无框、同一行，各自底部一条细线 */
+        #quote-toolbar {
+            flex-shrink: 0;
+            display: flex; align-items: center; flex-wrap: nowrap;
+            gap: 6px;
+            padding: 7px 14px;
+            background: transparent;
+        }
+        #quote-toolbar:empty { display: none; }
+        #quote-toolbar .quote-search-box,
+        #quote-toolbar .quote-select-box {
+            min-width: 0;
+            display: flex; align-items: center;
+            height: 28px;
+            box-sizing: border-box;
+            border: 0;
+            border-bottom: 0.5px solid rgba(164, 80, 80, 0.32);
+            border-radius: 0;
+            background: transparent;
+        }
+        #quote-toolbar .quote-search-box {
+            flex: 1 1 0;
+            overflow: hidden;
+        }
+        #quote-toolbar .quote-search-box:focus-within {
+            border-bottom-color: rgba(164, 80, 80, 0.6);
+        }
+        #quote-toolbar .quote-search-input {
+            flex: 1 1 0; min-width: 0; width: 100%; height: 100%;
+            background: transparent; border: 0; outline: none;
+            padding: 0 8px; font-size: 11px; letter-spacing: 0.4px;
+            color: var(--SmartThemeBodyColor);
+            font-family: 'Courier New', Courier, monospace;
+        }
+        #quote-toolbar .quote-search-input::placeholder {
+            color: color-mix(in srgb, var(--SmartThemeBodyColor) 30%, transparent);
+            font-style: italic;
+        }
+        #quote-toolbar .quote-search-btn,
+        #quote-toolbar .quote-reset-btn {
+            appearance: none; -webkit-appearance: none;
+            border: 0;
+            background: transparent; color: rgba(164, 80, 80, 0.7);
+            height: 100%; padding: 0 7px;
+            display: inline-flex; align-items: center; justify-content: center;
+            font-size: 11px; cursor: pointer;
+            transition: color 0.2s, background 0.2s;
+        }
+        #quote-toolbar .quote-search-btn:hover,
+        #quote-toolbar .quote-reset-btn:hover {
+            color: #a45050; background: transparent;
+        }
+        #quote-toolbar .quote-select-box {
+            position: relative;
+            flex: 0 1 auto;
+            max-width: 45%;
+            overflow: hidden;
+        }
+        #quote-toolbar .quote-select-box:focus-within {
+            border-bottom-color: rgba(164, 80, 80, 0.6);
+        }
+        #quote-toolbar select {
+            appearance: none; -webkit-appearance: none;
+            width: 100%; height: 100%; min-width: 0;
+            box-sizing: border-box;
+            padding: 0 6px 0 8px;
+            border: 0; border-radius: 0; outline: none;
+            background: transparent !important;
+            background-color: transparent !important;
+            box-shadow: none;
+            color: var(--SmartThemeBodyColor);
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 11px; letter-spacing: 0.4px; cursor: pointer;
+            white-space: nowrap;
+            text-overflow: clip;
+        }
+        #quote-toolbar select:hover { color: var(--SmartThemeBodyColor); }
+        #quote-toolbar .quote-select-box.is-filter {
+            flex: 0 0 auto;
+            width: calc(3em + 14px);
+            max-width: none;
+            font-size: 11px;
+        }
+        #quote-toolbar .quote-filter-label {
+            position: absolute; left: 8px; right: 4px; top: 0; bottom: 0;
+            display: flex; align-items: center;
+            color: var(--SmartThemeBodyColor);
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 11px; letter-spacing: 0.4px;
+            white-space: nowrap; overflow: hidden;
+            pointer-events: none;
+        }
+        /* 原生 select 的选中文字隐藏，收起状态由上面的 label 显示最多三个字；
+           下拉弹窗里的 option 仍然是完整名字 */
+        #quote-toolbar .quote-select-box.is-filter select {
+            position: relative; z-index: 1;
+            color: transparent !important;
+            -webkit-text-fill-color: transparent !important;
+        }
+        #quote-toolbar .quote-select-box.is-filter select option {
+            color: var(--SmartThemeBodyColor);
+            -webkit-text-fill-color: var(--SmartThemeBodyColor);
+            background: var(--SmartThemeBlurTintColor, #FDFBF7);
+        }
+        /* 手机上不换行：整体缩小，搜索和排序/筛选仍保持同一行 */
+        @media (max-width: 560px) {
+            #quote-toolbar { gap: 4px; padding: 6px 10px; }
+            #quote-toolbar .quote-search-box,
+            #quote-toolbar .quote-select-box { height: 26px; }
+            #quote-toolbar .quote-search-input { padding: 0 6px; font-size: 10px; }
+            #quote-toolbar .quote-search-btn,
+            #quote-toolbar .quote-reset-btn { padding: 0 5px; font-size: 10px; }
+            #quote-toolbar .quote-select-box { max-width: 48%; }
+            #quote-toolbar .quote-select-box.is-filter { width: calc(3em + 12px); max-width: none; font-size: 10px; }
+            #quote-toolbar .quote-filter-label { left: 6px; right: 3px; font-size: 10px; }
+            #quote-toolbar select { padding: 0 4px 0 6px; font-size: 10px; }
+        }
 
         .quote-content { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 12px; }
 
@@ -1845,6 +2080,7 @@ function setArchiveRenderLimit(value) {
                 <button type="button" class="quote-close" title="关闭" aria-label="关闭">&times;</button>
             </div>
         </div>
+        <div class="quote-toolbar" id="quote-toolbar"></div>
         <div class="quote-content" id="quote-list"></div>
         <!-- 🚨 极简底部英文 -->
         <div class="quote-footer">
@@ -1945,14 +2181,16 @@ function setArchiveRenderLimit(value) {
 
             let entry = byMesid.get(mesid);
             if (!entry) {
-                entry = { whole: new Set(), selections: [] };
+                entry = { whole: false, selections: [] };
                 byMesid.set(mesid, entry);
             }
 
             if (quote.source === 'selection') {
                 entry.selections.push(quote);
             } else {
-                entry.whole.add(String(quote.char ?? ''));
+                // 整层书签只认“同一聊天 + 同一楼层”，不再依赖存下来的角色名。
+                // 这样重命名角色、消息里的 name 变了，书签也不会假性消失。
+                entry.whole = true;
             }
         }
 
@@ -1972,11 +2210,11 @@ function setArchiveRenderLimit(value) {
         );
     }
 
-    function isMessageBookmarked(mesid, charName, chatInfo, ctx) {
+    function isMessageBookmarked(mesid, chatInfo, ctx) {
         if (!chatInfo?.active) return false;
         const index = getQuoteIndexForChat(chatInfo, ctx);
         const entry = index.byMesid.get(String(mesid));
-        return Boolean(entry && entry.whole.has(String(charName)));
+        return Boolean(entry && entry.whole);
     }
 
     let hydratedChatKey = '';
@@ -2102,7 +2340,7 @@ function setArchiveRenderLimit(value) {
         const entry = index.byMesid.get(mesid) || null;
         const wanted = entry ? entry.selections : [];
         const wantedKey = wanted.map(archiveQuoteKey).filter(Boolean).sort().join('|');
-        const isSaved = !isUser && Boolean(entry && entry.whole.has(charName));
+        const isSaved = !isUser && Boolean(entry && entry.whole);
 
         const previous = messageSyncState.get(mes);
         const container = mes.querySelector('.mes_text');
@@ -2456,7 +2694,7 @@ function setArchiveRenderLimit(value) {
         const chat = getQuoteChatInfo(quote);
         detailTitle.textContent = `${chat.char} - ${chat.chatName}`;
         detailMeta.textContent = [
-            quote.char || chat.char,
+            chat.char || quote.char,
             quote.mesid !== undefined && quote.mesid !== '' ? `#${quote.mesid}` : '',
             quote.time,
         ].filter(Boolean).join(' · ');
@@ -2480,6 +2718,7 @@ function setArchiveRenderLimit(value) {
     function closeQuotePanel() {
         hideQuoteDetail();
         overlay.classList.remove('show');
+        clearTimeout(quoteSearchTimer);
         // 面板关掉后没必要继续观察“加载更多”的哨兵
         if (typeof disconnectPanelObservers === 'function') disconnectPanelObservers();
     }
@@ -2501,6 +2740,14 @@ function setArchiveRenderLimit(value) {
         savedQuotes = savedQuotes.filter(item => item !== quote);
         saveQuotes();
         syncBookmarkAfterDelete(quote);
+
+        // 同步更新检索缓存，删完以后再搜索 / 排序不会把这条又翻出来
+        const removeFromList = list => {
+            const index = list.indexOf(quote);
+            if (index >= 0) list.splice(index, 1);
+        };
+        removeFromList(quotePanelData.currentQuotes);
+        quotePanelData.allGroups.forEach(group => removeFromList(group.quotes));
 
         // 删除单张卡片时只抠掉这一张，不重排整个面板，滚动位置和已加载的卡片都保住。
         if (cardEl instanceof Element && cardEl.isConnected) {
@@ -2625,6 +2872,10 @@ function setArchiveRenderLimit(value) {
             scope: String(raw.scope ?? '').trim(),
         };
         if (raw.source === 'selection') quote.source = 'selection';
+
+        const createdAt = Number(raw.createdAt);
+        if (Number.isFinite(createdAt) && createdAt > 0) quote.createdAt = createdAt;
+
         return quote;
     }
 
@@ -2755,6 +3006,21 @@ function setArchiveRenderLimit(value) {
     let panelObservers = [];
     let panelGroupData = new Map();
     const quoteCardMap = new WeakMap();
+
+    // 拾遗检索状态：两个 Tab 各自记住自己的搜索词 / 排序 / 角色筛选
+    const quotePanelFilters = {
+        current: { search: '', sort: 'time-desc' },
+        all: { search: '', char: '' },
+    };
+    const quotePanelData = {
+        currentQuotes: [],
+        allGroups: [],
+        toolbarTab: '',
+        toolbarChars: '',
+        toolbarChatKey: '',
+    };
+    const quoteTimeCache = new WeakMap();
+    let quoteSearchTimer = 0;
 
     function disconnectPanelObservers() {
         panelObservers.forEach(observer => {
@@ -2905,6 +3171,343 @@ function setArchiveRenderLimit(value) {
         observePanelSentinel(more, root, () => appendQuoteGroupChunk(list, groups, end, root));
     }
 
+    // ---- 拾遗检索：搜索 / 排序 / 角色筛选 ----
+
+    function normalizeQuoteSearch(value) {
+        return String(value ?? '')
+            .toLowerCase()
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+
+    function getQuoteFloor(quote) {
+        const mesid = String(quote?.mesid ?? '').trim();
+        return /^\d+$/.test(mesid) ? Number(mesid) : null;
+    }
+
+    function getQuoteTime(quote) {
+        if (!quote || typeof quote !== 'object') return 0;
+
+        const raw = quote.time;
+        const rawText = String(raw ?? '');
+        const createdAt = Number(quote.createdAt);
+        const hasCreatedAt = Number.isFinite(createdAt) && createdAt > 0;
+        const cacheKey = `${hasCreatedAt ? createdAt : ''}|${rawText}`;
+
+        const cached = quoteTimeCache.get(quote);
+        if (cached && cached.raw === cacheKey) return cached.value;
+
+        let value = 0;
+        if (hasCreatedAt) {
+            value = createdAt;
+        } else if (typeof raw === 'number' && Number.isFinite(raw)) {
+            value = raw;
+        } else {
+            value = Date.parse(rawText);
+            if (!Number.isFinite(value)) {
+                // 兼容 2026/11/15、2026-11-15 这类常见写法
+                value = Date.parse(rawText.replace(/[/.]/g, '-'));
+            }
+            if (!Number.isFinite(value)) {
+                value = Date.parse(rawText.replace(' ', 'T'));
+            }
+        }
+        if (!Number.isFinite(value)) value = 0;
+
+        quoteTimeCache.set(quote, { raw: cacheKey, value });
+        return value;
+    }
+
+    function sortCurrentQuotes(quotes, sortKey) {
+        // 用“写入 savedQuotes 的先后顺序”作为时间不可用时的兜底：
+        // 旧数据的 time 格式不一定能被 Date.parse 认出来，但收录顺序一定可靠。
+        const insertionOrder = new Map();
+        savedQuotes.forEach((quote, index) => insertionOrder.set(quote, index));
+
+        const byFloor = sortKey === 'floor-asc' || sortKey === 'floor-desc';
+        const direction = sortKey === 'floor-asc' || sortKey === 'time-asc' ? 1 : -1;
+
+        const items = quotes.map((quote, index) => ({
+            quote,
+            index,
+            floor: getQuoteFloor(quote),
+            time: getQuoteTime(quote),
+        }));
+
+        items.sort((a, b) => {
+            if (byFloor) {
+                if (a.floor === null && b.floor === null) return a.index - b.index;
+                if (a.floor === null) return 1; // 没有楼层号的收藏永远排在最后
+                if (b.floor === null) return -1;
+                if (a.floor !== b.floor) return (a.floor - b.floor) * direction;
+                return a.index - b.index; // 同一楼层：最近收录的在前
+            }
+
+            if (a.time !== b.time) {
+                if (!a.time) return 1;
+                if (!b.time) return -1;
+                return (a.time - b.time) * direction;
+            }
+
+            const orderA = insertionOrder.get(a.quote) ?? 0;
+            const orderB = insertionOrder.get(b.quote) ?? 0;
+            return (orderA - orderB) * direction;
+        });
+
+        return items.map(item => item.quote);
+    }
+
+    function filterCurrentQuotes() {
+        const state = quotePanelFilters.current;
+        const keyword = normalizeQuoteSearch(state.search);
+        const quotes = keyword
+            ? quotePanelData.currentQuotes.filter(quote => normalizeQuoteSearch(quote.text).includes(keyword))
+            : quotePanelData.currentQuotes;
+
+        return sortCurrentQuotes(quotes, state.sort);
+    }
+
+    function filterAllQuoteGroups() {
+        const state = quotePanelFilters.all;
+        const keyword = normalizeQuoteSearch(state.search);
+        const result = [];
+
+        quotePanelData.allGroups.forEach(group => {
+            if (state.char && String(group.chat.char || '').trim() !== state.char) return;
+
+            if (!keyword) {
+                result.push(group);
+                return;
+            }
+
+            // 角色名 / 对话名 / “角色 - 对话”整串命中：整组都显示，
+            // 避免“搜角色只搜出一句”的割裂感
+            const groupTitle = `${group.chat.char} - ${group.chat.chatName}`;
+            const nameMatched = normalizeQuoteSearch(group.chat.char).includes(keyword)
+                || normalizeQuoteSearch(group.chat.chatName).includes(keyword)
+                || normalizeQuoteSearch(groupTitle).includes(keyword);
+            if (nameMatched) {
+                result.push(group);
+                return;
+            }
+
+            const quotes = group.quotes.filter(quote => normalizeQuoteSearch(quote.text).includes(keyword));
+            if (quotes.length) {
+                result.push({ key: group.key, chat: group.chat, quotes });
+            }
+        });
+
+        return result;
+    }
+
+    function getQuoteCharacterNames(groups) {
+        const names = new Set();
+        groups.forEach(group => {
+            const name = String(group.chat.char || '').trim();
+            if (name) names.add(name);
+        });
+        return [...names].sort((a, b) => a.localeCompare(b));
+    }
+
+    // 收起状态最多只显示三个字符；下拉弹窗里仍然是完整名字
+    function getCharacterFilterLabel(name) {
+        return Array.from(String(name || '')).slice(0, 3).join('');
+    }
+
+    function renderQuoteNoResults(list) {
+        renderQuoteEmpty(
+            list,
+            '没有找到匹配的书签。\n换个关键词试试。',
+            'No matching gleanings found.'
+        );
+    }
+
+    function renderQuoteResults(resetScroll = false) {
+        const list = document.getElementById('quote-list');
+        if (!list || !overlay.classList.contains('show')) return;
+
+        disconnectPanelObservers();
+        panelGroupData = new Map();
+        list.replaceChildren();
+
+        if (activeQuoteTab === 'current') {
+            const chatInfo = getCurrentChatInfo();
+
+            if (!chatInfo.active) {
+                renderQuotePoem(list);
+                return;
+            }
+
+            if (!quotePanelData.currentQuotes.length) {
+                renderQuoteEmpty(list, '这里是寂静的荒原，\n等待第一场风暴。', 'A silent wasteland awaiting the first storm.');
+                return;
+            }
+
+            const quotes = filterCurrentQuotes();
+            if (!quotes.length) {
+                renderQuoteNoResults(list);
+            } else {
+                appendQuoteCardChunk(list, quotes, 0, list);
+            }
+
+            if (resetScroll) list.scrollTop = 0;
+            return;
+        }
+
+        if (!quotePanelData.allGroups.length) {
+            renderQuoteEmpty(list, '这里是寂静的荒原，\n等待第一场风暴。', 'A silent wasteland awaiting the first storm.');
+            return;
+        }
+
+        const groups = filterAllQuoteGroups();
+        if (!groups.length) {
+            renderQuoteNoResults(list);
+        } else {
+            appendQuoteGroupChunk(list, groups, 0, list);
+        }
+
+        if (resetScroll) list.scrollTop = 0;
+    }
+
+    function renderQuoteToolbar(tab, chars, enabled) {
+        const toolbar = document.getElementById('quote-toolbar');
+        if (!toolbar) return;
+
+        if (!enabled) {
+            clearTimeout(quoteSearchTimer);
+            quotePanelData.toolbarTab = '';
+            quotePanelData.toolbarChars = '';
+            toolbar.dataset.built = '0';
+            toolbar.replaceChildren();
+            return;
+        }
+
+        const charsKey = chars.join('\u0001');
+        if (quotePanelData.toolbarTab === tab
+            && quotePanelData.toolbarChars === charsKey
+            && toolbar.dataset.built === '1') {
+            return;
+        }
+
+        clearTimeout(quoteSearchTimer);
+        quotePanelData.toolbarTab = tab;
+        quotePanelData.toolbarChars = charsKey;
+
+        const isCurrent = tab === 'current';
+        const state = isCurrent ? quotePanelFilters.current : quotePanelFilters.all;
+
+        const sortOptions = [
+            ['floor-asc', 'Floor ↑'],
+            ['floor-desc', 'Floor ↓'],
+            ['time-asc', 'Time ↑'],
+            ['time-desc', 'Time ↓'],
+        ];
+        const sortValues = new Set(sortOptions.map(item => item[0]));
+        if (isCurrent && !sortValues.has(state.sort)) state.sort = 'time-desc';
+
+        const placeholder = isCurrent
+            ? 'Search this chat...'
+            : 'Search text / character / chat...';
+        const ariaLabel = isCurrent ? '搜索当前聊天的书签' : '搜索全部书签';
+
+        let selectHtml = '';
+        if (isCurrent) {
+            selectHtml = sortOptions
+                .map(([value, label]) => `<option value="${value}">${label}</option>`)
+                .join('');
+        } else {
+            selectHtml = '<option value="">char</option>';
+        }
+
+        toolbar.dataset.built = '1';
+        toolbar.innerHTML = `
+            <div class="quote-search-box">
+                <input type="text" class="quote-search-input" placeholder="${placeholder}" aria-label="${ariaLabel}">
+                <button type="button" class="quote-search-btn" title="Search" aria-label="搜索"><i class="fa-solid fa-magnifying-glass"></i></button>
+                <button type="button" class="quote-reset-btn" title="Reset" aria-label="重置"><i class="fa-solid fa-rotate-left"></i></button>
+            </div>
+            <div class="quote-select-box${isCurrent ? '' : ' is-filter'}">
+                ${isCurrent ? '' : '<span class="quote-filter-label">char</span>'}
+                <select class="${isCurrent ? 'quote-sort-select' : 'quote-filter-select'}" aria-label="${isCurrent ? '排序' : '按角色筛选'}">
+                    ${selectHtml}
+                </select>
+            </div>
+        `;
+
+        const input = toolbar.querySelector('.quote-search-input');
+        const searchBtn = toolbar.querySelector('.quote-search-btn');
+        const resetBtn = toolbar.querySelector('.quote-reset-btn');
+        const select = toolbar.querySelector('select');
+        const filterLabel = toolbar.querySelector('.quote-filter-label');
+
+        if (!isCurrent) {
+            chars.forEach(name => {
+                const option = document.createElement('option');
+                option.value = name;
+                // 下拉弹窗里保留完整名字；收起时靠 3 字宽的框自然截断
+                option.textContent = name;
+                option.title = name;
+                select.appendChild(option);
+            });
+        }
+
+        const updateSelectTitle = () => {
+            const option = select.options[select.selectedIndex];
+            const fullName = option?.title || option?.textContent || '';
+            select.title = fullName;
+            if (filterLabel) {
+                filterLabel.textContent = option?.value ? getCharacterFilterLabel(fullName) : 'char';
+            }
+        };
+
+        input.value = state.search || '';
+        if (isCurrent) {
+            select.value = state.sort;
+        } else {
+            select.value = state.char || '';
+            if (select.value !== (state.char || '')) {
+                state.char = '';
+                select.value = '';
+            }
+        }
+        updateSelectTitle();
+
+        const applySearch = () => {
+            clearTimeout(quoteSearchTimer);
+            state.search = input.value;
+            renderQuoteResults(true);
+        };
+
+        input.addEventListener('input', () => {
+            state.search = input.value;
+            clearTimeout(quoteSearchTimer);
+            quoteSearchTimer = setTimeout(() => renderQuoteResults(true), 140);
+        });
+        input.addEventListener('keydown', (event) => {
+            if (event.key !== 'Enter') return;
+            event.preventDefault();
+            applySearch();
+        });
+        searchBtn.addEventListener('click', applySearch);
+        resetBtn.addEventListener('click', () => {
+            clearTimeout(quoteSearchTimer);
+            input.value = '';
+            state.search = '';
+            if (!isCurrent) {
+                state.char = '';
+                select.value = '';
+                updateSelectTitle();
+            }
+            renderQuoteResults(true);
+        });
+        select.addEventListener('change', () => {
+            if (isCurrent) state.sort = select.value;
+            else state.char = select.value;
+            updateSelectTitle();
+            renderQuoteResults(true);
+        });
+    }
+
     function renderQuotes(force = false) {
         const list = document.getElementById('quote-list');
         if (!list) return;
@@ -2916,36 +3519,24 @@ function setArchiveRenderLimit(value) {
         const chatInfo = getCurrentChatInfo();
         ensureChatHydrated(chatInfo, ctx);
 
-        disconnectPanelObservers();
-        list.replaceChildren();
-        panelGroupData = new Map();
-
         if (activeQuoteTab === 'current') {
-            if (!chatInfo.active) {
-                renderQuotePoem(list);
-                return;
+            quotePanelData.currentQuotes = chatInfo.active
+                ? [...savedQuotes].reverse().filter(quote => quoteBelongsToChat(quote, chatInfo, ctx))
+                : [];
+
+            // 换聊天后，搜索词还留着会让人以为聊天里没书签；这里清掉搜索，排序保留。
+            if (chatInfo.active && quotePanelData.toolbarChatKey !== chatInfo.key) {
+                quotePanelData.toolbarChatKey = chatInfo.key;
+                quotePanelFilters.current.search = '';
+                quotePanelData.toolbarTab = '';
             }
 
-            const quotes = [...savedQuotes]
-                .reverse()
-                .filter(quote => quoteBelongsToChat(quote, chatInfo, ctx));
-
-            if (quotes.length === 0) {
-                renderQuoteEmpty(list, '这里是寂静的荒原，\n等待第一场风暴。', 'A silent wasteland awaiting the first storm.');
-                return;
-            }
-
-            appendQuoteCardChunk(list, quotes, 0, list);
-            return;
-        }
-
-        if (savedQuotes.length === 0) {
-            renderQuoteEmpty(list, '这里是寂静的荒原，\n等待第一场风暴。', 'A silent wasteland awaiting the first storm.');
+            renderQuoteToolbar('current', [], chatInfo.active && quotePanelData.currentQuotes.length > 0);
+            renderQuoteResults(true);
             return;
         }
 
         // 按聊天分组；倒序遍历，让最近收录的聊天和句子排在最前。
-        // 名字索引 / 当前聊天只取一次，避免每条收藏都重新查一遍角色表。
         const liveIndex = getLiveChatNameIndex();
         const groups = new Map();
 
@@ -2954,7 +3545,7 @@ function setArchiveRenderLimit(value) {
             const chat = getQuoteChatInfo(quote, { current: chatInfo, liveIndex });
             let group = groups.get(chat.key);
             if (!group) {
-                group = { key: chat.key, chat, quotes: [] };
+                group = { key: chat.key, chat: chat, quotes: [] };
                 groups.set(chat.key, group);
             }
             group.quotes.push(quote);
@@ -2965,7 +3556,15 @@ function setArchiveRenderLimit(value) {
             if (!groups.has(key)) expandedQuoteGroups.delete(key);
         });
 
-        appendQuoteGroupChunk(list, [...groups.values()], 0, list);
+        quotePanelData.allGroups = [...groups.values()];
+
+        const chars = getQuoteCharacterNames(quotePanelData.allGroups);
+        if (quotePanelFilters.all.char && !chars.includes(quotePanelFilters.all.char)) {
+            quotePanelFilters.all.char = '';
+        }
+
+        renderQuoteToolbar('all', chars, quotePanelData.allGroups.length > 0);
+        renderQuoteResults(true);
     }
 
     function activateQuoteInChat(quote) {
@@ -3049,6 +3648,7 @@ function setArchiveRenderLimit(value) {
             button.classList.toggle('active', isActive);
             button.setAttribute('aria-selected', String(isActive));
         });
+        clearTimeout(quoteSearchTimer);
         renderQuotes(true);
 
         const list = document.getElementById('quote-list');
@@ -3814,6 +4414,7 @@ function setArchiveRenderLimit(value) {
             savedQuotes = savedQuotes.filter(quote => !merged.has(quote));
             keep.text = payload.text;
             keep.time = new Date().toLocaleString();
+            keep.createdAt = Date.now();
             if (!keep.chatKey && chatInfo.key) keep.chatKey = chatInfo.key;
             if (!keep.chatName && chatInfo.chatName) keep.chatName = chatInfo.chatName;
 
@@ -3846,7 +4447,6 @@ function setArchiveRenderLimit(value) {
         // 只在“同一楼层”的候选里判重，不再把全场收藏扫一遍
         const duplicate = getSelectionCandidates(payload, chatInfo).some(quote => (
             String(quote.mesid ?? '') === mesid
-            && quote.char === charName
             && String(quote.chatKey ?? '') === String(chatInfo.key ?? '')
             && normalizeForCompare(quote.text) === targetText
         ));
@@ -3863,6 +4463,7 @@ function setArchiveRenderLimit(value) {
             char: charName,
             text: payload.text,
             time: new Date().toLocaleString(),
+            createdAt: Date.now(),
             chatKey: chatInfo.key || '',
             chatName: chatInfo.chatName || '',
             chatChar: chatInfo.charName || charName,
@@ -4069,14 +4670,13 @@ function setArchiveRenderLimit(value) {
 
         const ctx = getChatContext();
         const chatInfo = getCurrentChatInfo();
-        const isSaved = isMessageBookmarked(mesid, charName, chatInfo, ctx);
+        const isSaved = isMessageBookmarked(mesid, chatInfo, ctx);
 
         if (isSaved) {
             savedQuotes = savedQuotes.filter(q => !(
                 isWholeMessageQuote(q) &&
                 String(q.mesid) === String(mesid) &&
-                q.char === charName &&
-                (q.chatKey ? q.chatKey === chatInfo.key : true)
+                (q.chatKey ? q.chatKey === chatInfo.key : q.char === charName)
             ));
             btn.classList.remove('saved');
             btn.innerHTML = '<i class="fa-regular fa-bookmark"></i>';
@@ -4100,6 +4700,7 @@ function setArchiveRenderLimit(value) {
                 char: charName,
                 text: rawText,
                 time: new Date().toLocaleString(),
+                createdAt: Date.now(),
                 chatKey: chatInfo.key || '',
                 chatName: chatInfo.chatName || '',
                 chatChar: chatInfo.charName || charName,
