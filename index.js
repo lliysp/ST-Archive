@@ -343,7 +343,7 @@ function setArchiveRenderLimit(value) {
 })();
 
 (function () {
-    console.log("✨ [ST-档案馆] v1.5.0 索引版已启动！");
+    console.log("✨ [ST-档案馆] v1.6.0 索引搜索版已启动！");
 
     function escapeHtml(value) {
         return String(value ?? '').replace(/[&<>"']/g, char => ({
@@ -1161,7 +1161,7 @@ function setArchiveRenderLimit(value) {
 
 
 (function () {
-    console.log("📚 [ST-档案馆] 拾遗模块已加载（v1.5.0）！");
+    console.log("📚 [ST-档案馆] 拾遗模块已加载（v1.6.0）！");
 
     if (document.getElementById('quote-fab')) return;
 
@@ -3567,6 +3567,69 @@ function setArchiveRenderLimit(value) {
         renderQuoteResults(true);
     }
 
+    let chatScrollAnchorTimer = 0;
+    let chatOriginalOverflowAnchor = null;
+    let chatScrollToken = 0;
+
+    function getChatTargetTop(chat, target) {
+        const chatRect = chat.getBoundingClientRect();
+        const targetRect = target.getBoundingClientRect();
+        const viewport = chat.clientHeight;
+        const messageTop = chat.scrollTop + (targetRect.top - chatRect.top);
+        const messageHeight = targetRect.height;
+        const margin = 16;
+        const desired = messageHeight > viewport * 0.7
+            ? messageTop - margin
+            : messageTop - Math.max(margin, (viewport - messageHeight) / 2);
+        const maxTop = Math.max(0, chat.scrollHeight - viewport);
+        return Math.min(maxTop, Math.max(0, desired));
+    }
+
+    // 长文本楼层可能比整个视口还高，scrollIntoView({block:'center'}) 会把
+    // 它的中段对到屏幕中央，看起来就像“没跳过去”。这里直接算 #chat 内的偏移：
+    // 矮楼层居中，高楼层顶部对齐，并临时关掉滚动锚定，避免长正文把平滑滚动拽回去。
+    function scrollChatToMessage(target) {
+        const chat = document.getElementById('chat');
+        if (!chat || !target?.isConnected) {
+            try { target?.scrollIntoView?.({ behavior: 'smooth', block: 'center' }); } catch (error) { /* 忽略 */ }
+            return;
+        }
+
+        const top = getChatTargetTop(chat, target);
+        const token = ++chatScrollToken;
+
+        clearTimeout(chatScrollAnchorTimer);
+        if (chatOriginalOverflowAnchor === null) {
+            chatOriginalOverflowAnchor = chat.style.overflowAnchor;
+        }
+        chat.style.overflowAnchor = 'none';
+
+        try {
+            if (typeof chat.scrollTo === 'function') {
+                chat.scrollTo({ top, behavior: 'smooth' });
+            } else {
+                chat.scrollTop = top;
+            }
+        } catch (error) {
+            chat.scrollTop = top;
+        }
+
+        chatScrollAnchorTimer = setTimeout(() => {
+            chat.style.overflowAnchor = chatOriginalOverflowAnchor || '';
+            chatOriginalOverflowAnchor = null;
+        }, 1200);
+
+        // 移动端软键盘/长楼层可能让平滑滚动被取消或目标位置变化；
+        // 900ms 后重新量一次，不在视口里就直接补齐。
+        setTimeout(() => {
+            if (token !== chatScrollToken || !target.isConnected) return;
+            const rect = target.getBoundingClientRect();
+            const chatNow = chat.getBoundingClientRect();
+            const inView = rect.bottom > chatNow.top && rect.top < chatNow.bottom;
+            if (!inView) chat.scrollTop = getChatTargetTop(chat, target);
+        }, 900);
+    }
+
     function activateQuoteInChat(quote) {
         const mesid = String(quote.mesid ?? '');
         const targetMes = mesid
@@ -3583,7 +3646,7 @@ function setArchiveRenderLimit(value) {
 
         // 等面板动画结束、DOM 重排完毕后再高亮
         setTimeout(() => {
-            targetMes.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            scrollChatToMessage(targetMes);
             targetMes.classList.remove('highlight-mes');
             void targetMes.offsetWidth;
             targetMes.classList.add('highlight-mes');
@@ -4858,13 +4921,17 @@ function setArchiveRenderLimit(value) {
     // 性能要点：
     //   · 打开时只复制 chat 数组引用，不遍历、不预生成几千个节点；
     //   · 固定行高 + 虚拟列表，DOM 里始终只有“当前视口 + 少量缓冲”的几十个气泡；
-    //   · 每层楼的 20 字预览也是滚到附近才计算，计算后缓存；
+    //   · 每层楼的 50 字预览也是滚到附近才计算，计算后缓存；
     //   · 滚动监听用 rAF 合并，不会每个 scroll 事件都重排。
     // ==================================================
 
     const PLOT_ROW_HEIGHT = 64;
     const PLOT_OVERSCAN = 8;
     const PLOT_PREVIEW_LIMIT = 50;
+    const PLOT_HIT_MIN_CONTEXT = 3;
+    const PLOT_HIT_MAX_LEAD = 16;
+    const PLOT_SEARCH_BUDGET_MS = 8;
+    const PLOT_SEARCH_BATCH_MAX = 40;
 
     const plotIndex = {
         overlay: null,
@@ -4874,12 +4941,32 @@ function setArchiveRenderLimit(value) {
         empty: null,
         count: null,
         closeBtn: null,
+        searchBar: null,
+        searchInput: null,
+        searchReset: null,
+        searchResults: null,
         chat: null,
         cache: new Map(),
+        textCache: new Map(),
+        searchCache: new Map(),
         lastStart: -1,
         lastEnd: -1,
         frame: 0,
         returnFocus: null,
+        search: {
+            active: false,
+            keyword: '',
+            regex: null,
+            generation: 0,
+            nextIndex: 0,
+            matchCount: 0,
+            done: true,
+            scanning: false,
+            scanTimer: 0,
+            inputTimer: 0,
+            sentinel: null,
+            emptyEl: null,
+        },
     };
 
     function injectPlotIndexStyle() {
@@ -4957,6 +5044,58 @@ function setArchiveRenderLimit(value) {
             }
             #plot-index-close:hover { color: #8b3a3a; background: rgba(164, 80, 80, 0.1); }
 
+            #plot-index-searchbar {
+                flex: 0 0 auto;
+                width: min(92vw, 920px);
+                margin: 0 auto;
+                padding: 8px 28px 10px;
+                box-sizing: border-box;
+            }
+            .plot-index-search-box {
+                display: flex;
+                align-items: center;
+                height: 28px;
+                border: 0;
+                border-bottom: 0.5px solid rgba(164, 80, 80, 0.32);
+                background: transparent;
+            }
+            .plot-index-search-input {
+                flex: 1 1 0;
+                min-width: 0;
+                height: 100%;
+                border: 0;
+                outline: none;
+                background: transparent;
+                padding: 0 8px;
+                color: var(--SmartThemeBodyColor);
+                font-family: 'Courier New', Courier, monospace;
+                font-size: 11px;
+                letter-spacing: 0.4px;
+            }
+            .plot-index-search-input::placeholder {
+                color: color-mix(in srgb, var(--SmartThemeBodyColor) 30%, transparent);
+                font-style: italic;
+            }
+            .plot-index-search-box:focus-within {
+                border-bottom-color: rgba(164, 80, 80, 0.6);
+            }
+            .plot-index-search-reset {
+                flex: 0 0 auto;
+                appearance: none; -webkit-appearance: none;
+                height: 100%;
+                padding: 0 6px;
+                border: 0;
+                background: transparent;
+                color: rgba(164, 80, 80, 0.7);
+                font-size: 11px;
+                cursor: pointer;
+                transition: color 0.2s, background 0.2s;
+            }
+            .plot-index-search-reset:hover {
+                color: #a45050;
+                background: transparent;
+            }
+
             #plot-index-scroll {
                 flex: 1 1 0;
                 min-height: 0;
@@ -4964,6 +5103,49 @@ function setArchiveRenderLimit(value) {
                 overscroll-behavior: contain;
                 -webkit-overflow-scrolling: touch;
                 padding: 8px 0 40px;
+            }
+            #plot-index-search-results {
+                width: min(92vw, 920px);
+                margin: 0 auto;
+                padding: 4px 0 40px;
+            }
+            .plot-index-search-row {
+                position: relative;
+                height: 64px;
+                display: flex;
+                align-items: center;
+                padding: 4px 10px;
+                box-sizing: border-box;
+            }
+            .plot-index-search-row.is-user { justify-content: flex-end; }
+            .plot-index-search-more {
+                display: block;
+                margin: 14px auto 20px;
+                padding: 6px 18px;
+                border: 1px solid rgba(164, 80, 80, 0.3);
+                border-radius: 4px;
+                background: transparent;
+                color: #a45050;
+                font-family: 'Courier New', Courier, monospace;
+                font-size: 11px;
+                letter-spacing: 1px;
+                cursor: pointer;
+            }
+            .plot-index-search-more:hover { background: rgba(164, 80, 80, 0.08); }
+            .plot-index-search-empty {
+                margin: 24px auto;
+                padding: 12px;
+                text-align: center;
+                font-size: 13px;
+                letter-spacing: 1px;
+                color: color-mix(in srgb, var(--SmartThemeBodyColor) 60%, transparent);
+            }
+            .plot-index-hit {
+                color: #b24747;
+                background: rgba(164, 80, 80, 0.16);
+                border-radius: 2px;
+                padding: 0 1px;
+                font-weight: 600;
             }
             #plot-index-spacer {
                 position: relative;
@@ -5064,8 +5246,12 @@ function setArchiveRenderLimit(value) {
                 #plot-index-head { width: 94vw; padding: 14px 18px 10px; gap: 8px; }
                 #plot-index-title { font-size: 13px; letter-spacing: 2px; }
                 #plot-index-count { font-size: 9px; }
+                #plot-index-searchbar { width: 94vw; padding: 6px 18px 8px; }
+                .plot-index-search-input { padding: 0 6px; font-size: 10px; }
                 #plot-index-spacer { width: 94vw; }
+                #plot-index-search-results { width: 94vw; }
                 .plot-index-item { padding: 4px 4px; }
+                .plot-index-search-row { padding: 4px 4px; }
                 .plot-index-bubble-wrap { max-width: 86%; }
                 .plot-index-bubble { font-size: 12px; padding: 7px 10px; }
             }
@@ -5092,10 +5278,17 @@ function setArchiveRenderLimit(value) {
                     <div id="plot-index-count"></div>
                     <button type="button" id="plot-index-close" title="关闭" aria-label="关闭">&times;</button>
                 </div>
+                <div id="plot-index-searchbar">
+                    <div class="plot-index-search-box">
+                        <input id="plot-index-search-input" class="plot-index-search-input" type="text" placeholder="Search this chat..." aria-label="搜索剧情索引">
+                        <button type="button" id="plot-index-search-reset" class="plot-index-search-reset" title="清空搜索" aria-label="清空搜索"><i class="fa-solid fa-rotate-left"></i></button>
+                    </div>
+                </div>
                 <div id="plot-index-scroll">
                     <div id="plot-index-spacer">
                         <div id="plot-index-window"></div>
                     </div>
+                    <div id="plot-index-search-results" hidden></div>
                 </div>
                 <div class="plot-index-empty" id="plot-index-empty" hidden>当前聊天还没有可索引的楼层。</div>
             </div>
@@ -5109,14 +5302,43 @@ function setArchiveRenderLimit(value) {
         plotIndex.empty = overlay.querySelector('#plot-index-empty');
         plotIndex.count = overlay.querySelector('#plot-index-count');
         plotIndex.closeBtn = overlay.querySelector('#plot-index-close');
+        plotIndex.searchBar = overlay.querySelector('#plot-index-searchbar');
+        plotIndex.searchInput = overlay.querySelector('#plot-index-search-input');
+        plotIndex.searchReset = overlay.querySelector('#plot-index-search-reset');
+        plotIndex.searchResults = overlay.querySelector('#plot-index-search-results');
 
         plotIndex.closeBtn.addEventListener('click', closePlotIndex);
+
+        plotIndex.searchInput.addEventListener('input', () => {
+            const search = plotIndex.search;
+            clearTimeout(search.inputTimer);
+            search.inputTimer = setTimeout(() => {
+                search.inputTimer = 0;
+                beginPlotSearch(plotIndex.searchInput.value);
+            }, 160);
+        });
+        plotIndex.searchInput.addEventListener('keydown', (event) => {
+            if (event.key !== 'Enter') return;
+            event.preventDefault();
+            clearTimeout(plotIndex.search.inputTimer);
+            plotIndex.search.inputTimer = 0;
+            beginPlotSearch(plotIndex.searchInput.value);
+        });
+        plotIndex.searchReset.addEventListener('click', () => {
+            plotIndex.searchInput.value = '';
+            beginPlotSearch('');
+            plotIndex.searchInput.focus({ preventScroll: true });
+        });
 
         plotIndex.scroll.addEventListener('scroll', () => {
             if (plotIndex.frame) return;
             plotIndex.frame = requestAnimationFrame(() => {
                 plotIndex.frame = 0;
-                renderPlotWindow();
+                if (plotIndex.search.active) {
+                    if (isSearchNearBottom()) scheduleSearchBatch(0);
+                } else {
+                    renderPlotWindow();
+                }
             });
         }, { passive: true });
 
@@ -5124,7 +5346,7 @@ function setArchiveRenderLimit(value) {
             const bubble = event.target.closest?.('.plot-index-bubble');
             if (!bubble) return;
 
-            const row = bubble.closest('.plot-index-item');
+            const row = bubble.closest('.plot-index-item, .plot-index-search-row');
             const index = Number(row?.dataset.index);
             if (Number.isInteger(index)) jumpToPlotFloor(index);
         });
@@ -5147,7 +5369,7 @@ function setArchiveRenderLimit(value) {
         return overlay;
     }
 
-    function stripPlotPreview(value) {
+    function stripPlotText(value) {
         let text = String(value ?? '')
             .replace(/<br\s*\/?>/gi, ' ')
             .replace(/<[^>]*>/g, ' ')
@@ -5160,30 +5382,160 @@ function setArchiveRenderLimit(value) {
             .replace(/\s+/g, ' ')
             .trim();
 
-        if (!text) return '（空楼层）';
+        return text;
+    }
+
+    function readPlotText(index) {
+        if (plotIndex.textCache.has(index)) return plotIndex.textCache.get(index);
+        return stripPlotText(plotIndex.chat?.[index]?.mes);
+    }
+
+    function getPlotText(index) {
+        if (plotIndex.textCache.has(index)) return plotIndex.textCache.get(index);
+        const text = readPlotText(index);
+        plotIndex.textCache.set(index, text);
+        return text;
+    }
+
+    function getPlotMeta(index) {
+        const message = plotIndex.chat?.[index] || {};
+        return {
+            isUser: Boolean(message.is_user),
+            isSystem: Boolean(message.is_system) && !message.is_user,
+        };
+    }
+
+    function buildDefaultPreview(text) {
+        if (!text) {
+            return { before: '（空楼层）', hit: '', after: '', leading: false, trailing: false };
+        }
 
         const chars = Array.from(text);
-        if (chars.length <= PLOT_PREVIEW_LIMIT) return text;
-        return `${chars.slice(0, PLOT_PREVIEW_LIMIT).join('')}…`;
+        if (chars.length <= PLOT_PREVIEW_LIMIT) {
+            return { before: text, hit: '', after: '', leading: false, trailing: false };
+        }
+
+        return {
+            before: chars.slice(0, PLOT_PREVIEW_LIMIT).join(''),
+            hit: '',
+            after: '',
+            leading: false,
+            trailing: true,
+        };
     }
 
     function getPlotPreview(index) {
         let item = plotIndex.cache.get(index);
         if (item) return item;
 
-        const message = plotIndex.chat?.[index] || {};
+        const text = getPlotText(index);
         item = {
-            text: stripPlotPreview(message.mes),
-            isUser: Boolean(message.is_user),
-            isSystem: Boolean(message.is_system) && !message.is_user,
+            preview: buildDefaultPreview(text),
+            ...getPlotMeta(index),
         };
         plotIndex.cache.set(index, item);
         return item;
     }
 
+    // 命中预览：以关键词第一次出现的位置为中心，预算 50 字，
+    // 关键词之前最多留 16 字，保证关键词能落在第一行可见区域。
+    function buildSearchPreview(text, match) {
+        if (!text || !match) return null;
+
+        const matchStart = match.index;
+        const matchEnd = matchStart + match[0].length;
+        const matchText = match[0];
+
+        if (Array.from(text).length <= PLOT_PREVIEW_LIMIT) {
+            return {
+                before: text.slice(0, matchStart),
+                hit: matchText,
+                after: text.slice(matchEnd),
+                leading: false,
+                trailing: false,
+            };
+        }
+
+        const matchLength = Array.from(matchText).length;
+        const remaining = Math.max(PLOT_HIT_MIN_CONTEXT * 2, PLOT_PREVIEW_LIMIT - matchLength);
+
+        let beforeWant = Math.max(PLOT_HIT_MIN_CONTEXT, Math.floor(remaining / 2));
+        beforeWant = Math.min(beforeWant, PLOT_HIT_MAX_LEAD);
+
+        const beforeTake = Math.min(beforeWant, matchStart);
+        const afterWant = Math.max(PLOT_HIT_MIN_CONTEXT, remaining - beforeTake);
+        const afterTake = Math.min(afterWant, text.length - matchEnd);
+
+        const start = matchStart - beforeTake;
+        const end = matchEnd + afterTake;
+
+        return {
+            before: text.slice(start, matchStart),
+            hit: matchText,
+            after: text.slice(matchEnd, end),
+            leading: start > 0,
+            trailing: end < text.length,
+        };
+    }
+
+    // 三段分别用 textContent 渲染，消息里带 < > * ` 也不会破坏气泡结构。
+    function appendPlotPreview(container, preview) {
+        if (preview.leading) container.appendChild(document.createTextNode('…'));
+        if (preview.before) container.appendChild(document.createTextNode(preview.before));
+
+        if (preview.hit) {
+            const mark = document.createElement('mark');
+            mark.className = 'plot-index-hit';
+            mark.textContent = preview.hit;
+            container.appendChild(mark);
+        }
+
+        if (preview.after) container.appendChild(document.createTextNode(preview.after));
+        if (preview.trailing) container.appendChild(document.createTextNode('…'));
+    }
+
+    function createPlotRow(index, preview, meta, searchMode = false) {
+        const row = document.createElement('div');
+        row.className = (searchMode ? 'plot-index-search-row' : 'plot-index-item')
+            + (meta.isUser ? ' is-user' : '')
+            + (meta.isSystem ? ' is-system' : '');
+        row.dataset.index = String(index);
+
+        const bubble = document.createElement('button');
+        bubble.type = 'button';
+        bubble.className = 'plot-index-bubble';
+        bubble.title = `第 ${index} 楼`;
+        bubble.setAttribute('aria-label', `跳转到第 ${index} 楼`);
+
+        const text = document.createElement('span');
+        text.className = 'plot-index-text';
+        appendPlotPreview(text, preview);
+
+        const floor = document.createElement('span');
+        floor.className = 'plot-index-floor';
+        floor.textContent = `#${index}`;
+
+        bubble.appendChild(text);
+
+        const wrap = document.createElement('div');
+        wrap.className = 'plot-index-bubble-wrap';
+
+        // 楼层号放气泡外面，并和气泡底边对齐：Char 在右，User 在左
+        if (meta.isUser) {
+            wrap.appendChild(floor);
+            wrap.appendChild(bubble);
+        } else {
+            wrap.appendChild(bubble);
+            wrap.appendChild(floor);
+        }
+        row.appendChild(wrap);
+
+        return row;
+    }
+
     function renderPlotWindow(force = false) {
         const state = plotIndex;
-        if (!state.chat || !state.scroll) return;
+        if (!state.chat || !state.scroll || state.search.active) return;
 
         const total = state.chat.length;
         const viewport = state.scroll.clientHeight || window.innerHeight;
@@ -5208,48 +5560,194 @@ function setArchiveRenderLimit(value) {
 
         for (let index = start; index < end; index++) {
             const data = getPlotPreview(index);
-
-            const row = document.createElement('div');
-            row.className = 'plot-index-item'
-                + (data.isUser ? ' is-user' : '')
-                + (data.isSystem ? ' is-system' : '');
+            const row = createPlotRow(index, data.preview, data, false);
             row.style.top = `${(index - start) * PLOT_ROW_HEIGHT}px`;
-            row.dataset.index = String(index);
-
-            const bubble = document.createElement('button');
-            bubble.type = 'button';
-            bubble.className = 'plot-index-bubble';
-            bubble.title = `第 ${index} 楼`;
-            bubble.setAttribute('aria-label', `跳转到第 ${index} 楼`);
-
-            const text = document.createElement('span');
-            text.className = 'plot-index-text';
-            text.textContent = data.text;
-
-            const floor = document.createElement('span');
-            floor.className = 'plot-index-floor';
-            floor.textContent = `#${index}`;
-
-            bubble.appendChild(text);
-
-            const wrap = document.createElement('div');
-            wrap.className = 'plot-index-bubble-wrap';
-
-            // 楼层号放气泡外面，并和气泡底边对齐：Char 在右，User 在左
-            if (data.isUser) {
-                wrap.appendChild(floor);
-                wrap.appendChild(bubble);
-            } else {
-                wrap.appendChild(bubble);
-                wrap.appendChild(floor);
-            }
-            row.appendChild(wrap);
-
             fragment.appendChild(row);
         }
 
         windowEl.replaceChildren(fragment);
     }
+
+    function removePlotSearchSentinel() {
+        const search = plotIndex.search;
+        search.sentinel?.remove();
+        search.sentinel = null;
+    }
+
+    function ensurePlotSearchSentinel() {
+        const search = plotIndex.search;
+        if (!search.active || search.done || search.sentinel) return;
+
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'plot-index-search-more';
+        button.textContent = '继续搜索…';
+        button.addEventListener('click', () => schedulePlotSearchBatch(0));
+        plotIndex.searchResults.appendChild(button);
+        search.sentinel = button;
+    }
+
+    function isSearchNearBottom() {
+        const search = plotIndex.search;
+        if (!search.active || !search.sentinel?.isConnected) return false;
+
+        const scrollRect = plotIndex.scroll.getBoundingClientRect();
+        const sentinelRect = search.sentinel.getBoundingClientRect();
+        return sentinelRect.top <= scrollRect.bottom + 420;
+    }
+
+    function schedulePlotSearchBatch(delay = 0) {
+        const search = plotIndex.search;
+        if (!search.active || search.done || search.scanning || search.scanTimer) return;
+
+        const generation = search.generation;
+        search.scanTimer = setTimeout(() => {
+            search.scanTimer = 0;
+            scanPlotSearchBatch(generation);
+        }, delay);
+    }
+
+    function scanPlotSearchBatch(generation) {
+        const search = plotIndex.search;
+        if (!plotIndex.chat || !search.active || search.done || search.scanning
+            || generation !== search.generation) {
+            return;
+        }
+
+        search.scanning = true;
+        const startedAt = performance.now();
+        const fragment = document.createDocumentFragment();
+        let scanned = 0;
+
+        try {
+            while (search.nextIndex < plotIndex.chat.length) {
+                if (performance.now() - startedAt > PLOT_SEARCH_BUDGET_MS
+                    || scanned >= PLOT_SEARCH_BATCH_MAX) {
+                    break;
+                }
+
+                const index = search.nextIndex++;
+                const text = readPlotText(index);
+                scanned++;
+                if (!text) continue;
+
+                const match = search.regex.exec(text);
+                if (!match) continue;
+                plotIndex.textCache.set(index, text);
+
+                const cacheKey = `${search.keyword}\u0000${index}`;
+                let preview = plotIndex.searchCache.get(cacheKey);
+                if (!preview) {
+                    preview = buildSearchPreview(text, match);
+                    if (!preview) continue;
+                    plotIndex.searchCache.set(cacheKey, preview);
+                }
+
+                fragment.appendChild(createPlotRow(index, preview, getPlotMeta(index), true));
+                search.matchCount++;
+            }
+
+            if (fragment.childNodes.length) {
+                const sentinel = search.sentinel;
+                if (sentinel?.isConnected) {
+                    plotIndex.searchResults.insertBefore(fragment, sentinel);
+                } else {
+                    plotIndex.searchResults.appendChild(fragment);
+                }
+            }
+        } finally {
+            search.scanning = false;
+        }
+
+        if (search.nextIndex >= plotIndex.chat.length) {
+            search.done = true;
+            removePlotSearchSentinel();
+
+            if (search.matchCount === 0) {
+                const empty = document.createElement('div');
+                empty.className = 'plot-index-search-empty';
+                empty.textContent = '没有找到匹配的楼层。';
+                plotIndex.searchResults.appendChild(empty);
+                search.emptyEl = empty;
+            }
+            return;
+        }
+
+        ensurePlotSearchSentinel();
+
+        // 一条都没找到时继续自动往后搜，避免“明明有却显示空”；
+        // 已经有结果就停下，等用户滚到底或点“继续搜索”，不做全量预扫。
+        if (search.matchCount === 0 && isSearchNearBottom()) {
+            schedulePlotSearchBatch(24);
+        }
+    }
+
+    function beginPlotSearch(rawKeyword) {
+        if (!plotIndex.chat) return;
+
+        const search = plotIndex.search;
+        const keyword = String(rawKeyword || '').trim();
+
+        clearTimeout(search.inputTimer);
+        clearTimeout(search.scanTimer);
+        search.inputTimer = 0;
+        search.scanTimer = 0;
+        search.generation++;
+        search.scanning = false;
+        search.keyword = keyword;
+        search.regex = keyword ? new RegExp(escapeRegExp(keyword), 'i') : null;
+        search.nextIndex = 0;
+        search.matchCount = 0;
+        search.done = !keyword;
+        search.emptyEl?.remove();
+        search.emptyEl = null;
+        removePlotSearchSentinel();
+        plotIndex.searchResults.replaceChildren();
+
+        if (!keyword) {
+            search.active = false;
+            plotIndex.searchResults.hidden = true;
+            plotIndex.spacer.hidden = false;
+            plotIndex.scroll.scrollTop = 0;
+            renderPlotWindow(true);
+            return;
+        }
+
+        search.active = true;
+        plotIndex.spacer.hidden = true;
+        plotIndex.searchResults.hidden = false;
+        plotIndex.scroll.scrollTop = 0;
+        scanPlotSearchBatch(search.generation);
+    }
+
+    function clearPlotSearch(renderVirtual = false) {
+        const search = plotIndex.search;
+        search.generation++;
+        clearTimeout(search.inputTimer);
+        clearTimeout(search.scanTimer);
+        search.inputTimer = 0;
+        search.scanTimer = 0;
+        search.active = false;
+        search.keyword = '';
+        search.regex = null;
+        search.nextIndex = 0;
+        search.matchCount = 0;
+        search.done = true;
+        search.scanning = false;
+        search.emptyEl?.remove();
+        search.emptyEl = null;
+        removePlotSearchSentinel();
+        plotIndex.searchResults?.replaceChildren();
+        if (plotIndex.searchResults) plotIndex.searchResults.hidden = true;
+        if (plotIndex.searchInput) plotIndex.searchInput.value = '';
+        if (plotIndex.spacer) plotIndex.spacer.hidden = false;
+
+        if (renderVirtual && plotIndex.overlay?.classList.contains('show')) {
+            plotIndex.scroll.scrollTop = 0;
+            renderPlotWindow(true);
+        }
+    }
+
 
     function openPlotIndex() {
         const ctx = getChatContext();
@@ -5259,9 +5757,13 @@ function setArchiveRenderLimit(value) {
 
         plotIndex.chat = chat;
         plotIndex.cache.clear();
+        plotIndex.textCache.clear();
+        plotIndex.searchCache.clear();
         plotIndex.lastStart = -1;
         plotIndex.lastEnd = -1;
         plotIndex.returnFocus = document.activeElement;
+
+        clearPlotSearch(false);
 
         plotIndex.count.textContent = `${chat.length} 层`;
         plotIndex.spacer.style.height = `${chat.length * PLOT_ROW_HEIGHT}px`;
@@ -5269,6 +5771,7 @@ function setArchiveRenderLimit(value) {
 
         const isEmpty = chat.length === 0;
         plotIndex.empty.hidden = !isEmpty;
+        plotIndex.searchBar.hidden = isEmpty;
         plotIndex.scroll.style.display = isEmpty ? 'none' : '';
 
         plotIndex.overlay.classList.add('show');
@@ -5297,8 +5800,14 @@ function setArchiveRenderLimit(value) {
             state.frame = 0;
         }
 
+        // 手机上搜索框可能还带着软键盘，先收起来再让 #chat 结算高度
+        state.searchInput?.blur();
+        clearPlotSearch(false);
+
         state.chat = null;
         state.cache.clear();
+        state.textCache.clear();
+        state.searchCache.clear();
         state.lastStart = -1;
         state.lastEnd = -1;
         state.windowEl?.replaceChildren();
@@ -5321,12 +5830,12 @@ function setArchiveRenderLimit(value) {
         }
 
         setTimeout(() => {
-            target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            scrollChatToMessage(target);
             target.classList.remove('highlight-mes');
             void target.offsetWidth;
             target.classList.add('highlight-mes');
             setTimeout(() => target.classList.remove('highlight-mes'), 2000);
-        }, 100);
+        }, 320);
     }
 
     function installPlotIndexWandButton() {
