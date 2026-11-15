@@ -51,10 +51,11 @@
 - **点击跳转**：点击任意气泡，平滑滚动到对应楼层，并附带短暂呼吸高亮。
 - **虚拟列表**：无论聊天有几百还是几千楼，DOM 中始终只保留视口附近的几十个气泡；预览文字也只在滚到附近时计算并缓存，打开面板不会一次性渲染几千个 `div`。
 
+
 ## 界面预览
 预览设备：SillyTavern v1.19.0，主题 Dark Lite，pc端 windows11(Edge浏览器),android移动端(Edge浏览器)
 <p align="center">
-  <img width="2549" height="1403" alt="image" src="https://github.com/user-attachments/assets/ba2c40c5-37af-4a94-82d9-b4fd65939b84" width="90%" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);" />
+  <img width="2549" height="1403" alt="image" src="https://github.com/user-attachments/assets/05501799-a080-4194-a6e8-30f02f10cade" width="90%" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);" />
   <em>PC端-首页</em>
   <p align="center">
   <img width="1156" height="152" alt="image" src="https://github.com/user-attachments/assets/58f6589e-083d-477b-a752-810fbf11fd43" width="90%" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);" />
@@ -64,20 +65,9 @@
   <img width="2549" height="1403" alt="image" src="https://github.com/user-attachments/assets/b12be31a-0e54-4e6e-812b-776990c3c548" width="90%" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);" />
   <em>PC端-书签详情</em>
 </p>
-
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/ef1e47e9-ecf2-42a7-a64c-24abef4aa48c" width="31%" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);">
-  &nbsp;&nbsp;&nbsp; 
-  <img src="https://github.com/user-attachments/assets/1249dd95-f4f1-4063-b41d-9532bbc42a26" width="31%" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);">
-  &nbsp;&nbsp;&nbsp; 
-  <img src="https://github.com/user-attachments/assets/d45c6117-e001-4d42-918c-5a3dc1a63d50" width="31%" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);">
-</p>
-<p align="center">
-  <em>手机端-首页</em>
-  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
-  <em>手机端-划线收藏</em>
-  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
-  <em>手机端-书签详情</em>
+  <img width="2549" height="1403" alt="image" src="https://github.com/user-attachments/assets/794ee6f3-1017-480e-bd16-7058c03537d3" width="90%" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);" />
+  <em>PC端-剧情索引</em>
 </p>
 
 ## 安装方法
