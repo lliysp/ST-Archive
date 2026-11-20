@@ -1,4 +1,7 @@
 // @ts-nocheck
+// 装饰配色：必须在任何界面渲染之前执行，把 --sa-* 变量写进 :root
+import './theme.js';
+
 // ==================================================
 // 共享存储层
 // 数据原来只存在浏览器 localStorage 里，换设备就看不到。
@@ -336,14 +339,14 @@ function setArchiveRenderLimit(value) {
     style.textContent = [
         '#chat .welcomePanel .recentChatList{display:none !important;}',
         '.mes_text .quote-underline{text-decoration-line:underline !important;',
-        'text-decoration-color:rgba(164,80,80,0.75) !important;',
+        'text-decoration-color:rgba(var(--sa-accent-rgb, 164, 80, 80),0.75) !important;',
         'text-decoration-thickness:1.5px !important;text-underline-offset:3px !important;}',
     ].join('');
     (document.head || document.documentElement).appendChild(style);
 })();
 
 (function () {
-    console.log("✨ [ST-档案馆] v1.7.0 卡片导出版已启动！");
+    console.log("✨ [ST-档案馆] v1.8.0 配色版已启动！");
 
     function escapeHtml(value) {
         return String(value ?? '').replace(/[&<>"']/g, char => ({
@@ -1690,8 +1693,8 @@ function setArchiveRenderLimit(value) {
             width: 32px !important; 
             height: 32px !important;
             background: transparent !important; 
-            color: #a45050 !important; 
-            border: 1px solid #a45050 !important; 
+            color: var(--sa-accent, #a45050) !important; 
+            border: 1px solid var(--sa-accent, #a45050) !important; 
             border-radius: 50% !important; 
             display: flex !important; 
             justify-content: center !important; 
@@ -1707,7 +1710,7 @@ function setArchiveRenderLimit(value) {
         }
         #quote-fab:hover, #quote-fab:active {
             opacity: 1 !important;
-            background: rgba(164, 80, 80, 0.1) !important;
+            background: rgba(var(--sa-accent-rgb, 164, 80, 80), 0.1) !important;
             cursor: grabbing !important;
         }
 
@@ -1721,48 +1724,48 @@ function setArchiveRenderLimit(value) {
 
         #quote-panel {
             width: 90%; max-width: 600px; height: 70vh; max-height: 80vh;
-            background: #FDFBF7; border: 1px solid rgba(164, 80, 80, 0.4);
+            background: var(--sa-paper, #FDFBF7); border: 1px solid rgba(var(--sa-accent-rgb, 164, 80, 80), 0.4);
             border-radius: 12px; display: flex; flex-direction: column;
-            box-shadow: 0 10px 40px rgba(0,0,0,0.2); color: #4A4A4A;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2); color: var(--sa-ink, #4A4A4A);
             font-family: 'Noto Serif SC', 'Songti SC', serif; overflow: hidden;
             transform: scale(0.95); transition: transform 0.2s;
         }
         #quote-overlay.show #quote-panel { transform: scale(1); }
 
         .quote-header {
-            padding: 14px 18px; border-bottom: 1px dashed rgba(164, 80, 80, 0.3);
+            padding: 14px 18px; border-bottom: 1px dashed rgba(var(--sa-accent-rgb, 164, 80, 80), 0.3);
             display: flex; justify-content: space-between; align-items: center; gap: 12px;
-            background: rgba(164, 80, 80, 0.05);
+            background: rgba(var(--sa-accent-rgb, 164, 80, 80), 0.05);
         }
         .quote-tabs { display: flex; align-items: center; gap: 2px; min-width: 0; }
         #quote-panel .quote-tab {
             appearance: none; -webkit-appearance: none; border: 0; background: transparent;
-            color: rgba(74, 74, 74, 0.55); padding: 6px 10px; border-radius: 6px;
+            color: rgba(var(--sa-ink-rgb, 74, 74, 74), 0.55); padding: 6px 10px; border-radius: 6px;
             font-family: inherit; font-size: 12px; letter-spacing: 1px; cursor: pointer;
             transition: color 0.2s, background 0.2s;
         }
-        #quote-panel .quote-tab:hover { color: #a45050; background: rgba(164, 80, 80, 0.06); }
-        #quote-panel .quote-tab.active { color: #a45050; background: rgba(164, 80, 80, 0.1); font-weight: 600; }
-        .quote-tab-sep { color: rgba(164, 80, 80, 0.28); font-size: 11px; user-select: none; }
+        #quote-panel .quote-tab:hover { color: var(--sa-accent, #a45050); background: rgba(var(--sa-accent-rgb, 164, 80, 80), 0.06); }
+        #quote-panel .quote-tab.active { color: var(--sa-accent, #a45050); background: rgba(var(--sa-accent-rgb, 164, 80, 80), 0.1); font-weight: 600; }
+        .quote-tab-sep { color: rgba(var(--sa-accent-rgb, 164, 80, 80), 0.28); font-size: 11px; user-select: none; }
         .quote-header-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
         #quote-panel .quote-header-btn {
             appearance: none; -webkit-appearance: none;
             width: 28px; height: 28px; padding: 0; border: 0; border-radius: 6px;
-            background: transparent; color: rgba(164, 80, 80, 0.72);
+            background: transparent; color: rgba(var(--sa-accent-rgb, 164, 80, 80), 0.72);
             display: inline-flex; align-items: center; justify-content: center;
             font-size: 13px; line-height: 1; cursor: pointer;
             box-shadow: none; transition: color 0.2s, background 0.2s;
         }
-        #quote-panel .quote-header-btn:hover { color: #a45050; background: rgba(164, 80, 80, 0.1); }
-        #quote-panel .quote-header-btn:active { background: rgba(164, 80, 80, 0.16); }
+        #quote-panel .quote-header-btn:hover { color: var(--sa-accent, #a45050); background: rgba(var(--sa-accent-rgb, 164, 80, 80), 0.1); }
+        #quote-panel .quote-header-btn:active { background: rgba(var(--sa-accent-rgb, 164, 80, 80), 0.16); }
         #quote-panel .quote-close {
             appearance: none; -webkit-appearance: none;
             width: 28px; height: 28px; padding: 0; border: 0; border-radius: 6px;
-            background: transparent; color: #a45050; font-family: Arial, sans-serif;
+            background: transparent; color: var(--sa-accent, #a45050); font-family: Arial, sans-serif;
             font-size: 22px; line-height: 1; cursor: pointer; flex-shrink: 0;
             box-shadow: none; transition: color 0.2s, background 0.2s;
         }
-        #quote-panel .quote-close:hover { color: #8b3a3a; background: rgba(164, 80, 80, 0.08); }
+        #quote-panel .quote-close:hover { color: var(--sa-accent-deep, #8b3a3a); background: rgba(var(--sa-accent-rgb, 164, 80, 80), 0.08); }
 
         /* 拾遗检索：搜索和排序/筛选无框、同一行，各自底部一条细线 */
         #quote-toolbar {
@@ -1780,7 +1783,7 @@ function setArchiveRenderLimit(value) {
             height: 28px;
             box-sizing: border-box;
             border: 0;
-            border-bottom: 0.5px solid rgba(164, 80, 80, 0.32);
+            border-bottom: 0.5px solid rgba(var(--sa-accent-rgb, 164, 80, 80), 0.32);
             border-radius: 0;
             background: transparent;
         }
@@ -1789,7 +1792,7 @@ function setArchiveRenderLimit(value) {
             overflow: hidden;
         }
         #quote-toolbar .quote-search-box:focus-within {
-            border-bottom-color: rgba(164, 80, 80, 0.6);
+            border-bottom-color: rgba(var(--sa-accent-rgb, 164, 80, 80), 0.6);
         }
         #quote-toolbar .quote-search-input {
             flex: 1 1 0; min-width: 0; width: 100%; height: 100%;
@@ -1806,7 +1809,7 @@ function setArchiveRenderLimit(value) {
         #quote-toolbar .quote-reset-btn {
             appearance: none; -webkit-appearance: none;
             border: 0;
-            background: transparent; color: rgba(164, 80, 80, 0.7);
+            background: transparent; color: rgba(var(--sa-accent-rgb, 164, 80, 80), 0.7);
             height: 100%; padding: 0 7px;
             display: inline-flex; align-items: center; justify-content: center;
             font-size: 11px; cursor: pointer;
@@ -1814,7 +1817,7 @@ function setArchiveRenderLimit(value) {
         }
         #quote-toolbar .quote-search-btn:hover,
         #quote-toolbar .quote-reset-btn:hover {
-            color: #a45050; background: transparent;
+            color: var(--sa-accent, #a45050); background: transparent;
         }
         #quote-toolbar .quote-select-box {
             position: relative;
@@ -1823,7 +1826,7 @@ function setArchiveRenderLimit(value) {
             overflow: hidden;
         }
         #quote-toolbar .quote-select-box:focus-within {
-            border-bottom-color: rgba(164, 80, 80, 0.6);
+            border-bottom-color: rgba(var(--sa-accent-rgb, 164, 80, 80), 0.6);
         }
         #quote-toolbar select {
             appearance: none; -webkit-appearance: none;
@@ -1866,7 +1869,7 @@ function setArchiveRenderLimit(value) {
         #quote-toolbar .quote-select-box.is-filter select option {
             color: var(--SmartThemeBodyColor);
             -webkit-text-fill-color: var(--SmartThemeBodyColor);
-            background: var(--SmartThemeBlurTintColor, #FDFBF7);
+            background: var(--SmartThemeBlurTintColor, var(--sa-paper, #FDFBF7));
         }
         /* 手机上不换行：整体缩小，搜索和排序/筛选仍保持同一行 */
         @media (max-width: 560px) {
@@ -1885,7 +1888,7 @@ function setArchiveRenderLimit(value) {
         .quote-content { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 12px; }
 
         .quote-group {
-            border-left: 2px solid rgba(164, 80, 80, 0.35);
+            border-left: 2px solid rgba(var(--sa-accent-rgb, 164, 80, 80), 0.35);
             padding-left: 12px;
             margin-bottom: 16px;
         }
@@ -1893,21 +1896,21 @@ function setArchiveRenderLimit(value) {
         .quote-group-header {
             display: flex; justify-content: space-between; align-items: center; gap: 12px;
             padding: 8px 4px; cursor: pointer; user-select: none;
-            border-bottom: 1px dashed rgba(164, 80, 80, 0.25);
+            border-bottom: 1px dashed rgba(var(--sa-accent-rgb, 164, 80, 80), 0.25);
             transition: background 0.2s;
         }
-        .quote-group-header:hover { background: rgba(164, 80, 80, 0.04); }
+        .quote-group-header:hover { background: rgba(var(--sa-accent-rgb, 164, 80, 80), 0.04); }
         .quote-group-title { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; }
-        .quote-group-title .icon { color: #a45050; font-size: 12px; display: inline-block; transition: transform 0.25s; flex-shrink: 0; }
+        .quote-group-title .icon { color: var(--sa-accent, #a45050); font-size: 12px; display: inline-block; transition: transform 0.25s; flex-shrink: 0; }
         .quote-group.is-open .quote-group-title .icon { transform: rotate(90deg); }
         .quote-group-name {
-            font-size: 14px; font-weight: 600; color: #4A4A4A; letter-spacing: 1px;
+            font-size: 14px; font-weight: 600; color: var(--sa-ink, #4A4A4A); letter-spacing: 1px;
             font-family: 'Noto Serif SC', 'Songti SC', serif;
             line-height: 1.45; overflow-wrap: anywhere;
         }
         .quote-group-meta { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
         .quote-group-count { font-size: 11px; color: #999; font-family: 'Courier New', Courier, monospace; }
-        .quote-group-chevron { font-size: 10px; color: #a45050; transition: transform 0.25s; }
+        .quote-group-chevron { font-size: 10px; color: var(--sa-accent, #a45050); transition: transform 0.25s; }
         .quote-group.is-open .quote-group-chevron { transform: rotate(180deg); }
         .quote-group-content { display: none; flex-direction: column; gap: 10px; padding: 12px 0 2px; }
         .quote-group.is-open .quote-group-content { display: flex; }
@@ -1915,15 +1918,15 @@ function setArchiveRenderLimit(value) {
         .quote-card {
             position: relative;
             background: #ffffff; padding: 12px 38px 12px 15px;
-            border-left: 3px solid #a45050; border-radius: 6px;
+            border-left: 3px solid var(--sa-accent, #a45050); border-radius: 6px;
             cursor: pointer;
             /* 只过渡真正会变的属性，别用 transition: all 拖累大量卡片的绘制 */
             transition: background-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
             box-shadow: 0 2px 8px rgba(0,0,0,0.03);
         }
-        .quote-card:hover { background: #faf8f5; box-shadow: 0 4px 12px rgba(0,0,0,0.06); transform: translateY(-1px); }
+        .quote-card:hover { background: var(--sa-paper-deep, #faf8f5); box-shadow: 0 4px 12px rgba(0,0,0,0.06); transform: translateY(-1px); }
         .quote-card .q-text {
-            font-size: 14px; color: #333; line-height: 1.6; white-space: pre-wrap;
+            font-size: 14px; color: var(--sa-ink-strong, #333); line-height: 1.6; white-space: pre-wrap;
             display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; overflow: hidden;
             overflow-wrap: anywhere;
         }
@@ -1931,11 +1934,11 @@ function setArchiveRenderLimit(value) {
         #quote-panel .quote-delete {
             position: absolute; top: 7px; right: 8px;
             width: 20px; height: 20px; padding: 0; border: 0; border-radius: 50%;
-            background: transparent; color: #a45050; opacity: 0.42;
+            background: transparent; color: var(--sa-accent, #a45050); opacity: 0.42;
             font-family: Arial, sans-serif; font-size: 16px; line-height: 20px; text-align: center;
             cursor: pointer; transition: opacity 0.2s, background 0.2s, transform 0.2s;
         }
-        #quote-panel .quote-delete:hover { opacity: 1; background: rgba(164, 80, 80, 0.1); transform: scale(1.08); }
+        #quote-panel .quote-delete:hover { opacity: 1; background: rgba(var(--sa-accent-rgb, 164, 80, 80), 0.1); transform: scale(1.08); }
 
         .quote-poem { margin: auto; max-width: 470px; padding: 10px 8px 36px; text-align: center; }
         .quote-poem-cn {
@@ -1957,8 +1960,8 @@ function setArchiveRenderLimit(value) {
             display: inline-flex; justify-content: center; align-items: center;
             margin-left: 10px; font-size: 14px; pointer-events: auto !important;
         }
-        .mes-bookmark-btn:hover { color: #a45050; transform: scale(1.1); }
-        .mes-bookmark-btn.saved { color: #a45050; }
+        .mes-bookmark-btn:hover { color: var(--sa-accent, #a45050); transform: scale(1.1); }
+        .mes-bookmark-btn.saved { color: var(--sa-accent, #a45050); }
 
         #quote-detail-overlay {
             position: fixed; top: 0; left: 0; right: 0; bottom: 0; inset: 0;
@@ -1995,9 +1998,9 @@ function setArchiveRenderLimit(value) {
             max-height: min(72vh, 100%);
             margin: 0 auto;
             overflow: hidden;
-            border: 1px solid rgba(164, 80, 80, 0.4); border-radius: 12px;
-            background: linear-gradient(145deg, #FEFCF8 0%, #F8F2E9 100%);
-            color: #4A4A4A; box-shadow: 0 18px 50px rgba(60, 40, 32, 0.22);
+            border: 1px solid rgba(var(--sa-accent-rgb, 164, 80, 80), 0.4); border-radius: 12px;
+            background: linear-gradient(145deg, var(--sa-paper, #FEFCF8) 0%, var(--sa-paper-deep, #F8F2E9) 100%);
+            color: var(--sa-ink, #4A4A4A); box-shadow: 0 18px 50px rgba(60, 40, 32, 0.22);
             font-family: 'Noto Serif SC', 'Songti SC', serif;
             transform: translateY(6px) scale(0.98); animation: quoteDetailIn 0.22s ease-out forwards;
         }
@@ -2008,23 +2011,23 @@ function setArchiveRenderLimit(value) {
         #quote-detail-overlay .quote-detail-close {
             margin-left: auto; flex-shrink: 0;
             width: 28px; height: 28px; padding: 0; border: 0; border-radius: 6px;
-            background: none; color: #a45050; font-family: Arial, sans-serif;
+            background: none; color: var(--sa-accent, #a45050); font-family: Arial, sans-serif;
             font-size: 24px; line-height: 1; cursor: pointer; box-shadow: none;
         }
-        #quote-detail-overlay .quote-detail-close:hover { color: #8b3a3a; }
+        #quote-detail-overlay .quote-detail-close:hover { color: var(--sa-accent-deep, #8b3a3a); }
         .quote-detail-title {
             flex: 1; min-width: 0;
             font-family: 'Noto Serif SC', 'Songti SC', serif;
-            font-size: 15px; color: #8b3a3a; letter-spacing: 1.5px; line-height: 1.6;
+            font-size: 15px; color: var(--sa-accent-deep, #8b3a3a); letter-spacing: 1.5px; line-height: 1.6;
             overflow-wrap: anywhere; word-break: break-word;
         }
         .quote-detail-title::before {
-            content: "❖"; margin-right: 8px; color: #a45050; font-size: 11px;
+            content: "❖"; margin-right: 8px; color: var(--sa-accent, #a45050); font-size: 11px;
             vertical-align: 1px;
         }
         .quote-detail-meta {
             flex-shrink: 0;
-            margin: 12px 24px 16px; padding-bottom: 12px; border-bottom: 1px dashed rgba(164, 80, 80, 0.28);
+            margin: 12px 24px 16px; padding-bottom: 12px; border-bottom: 1px dashed rgba(var(--sa-accent-rgb, 164, 80, 80), 0.28);
             color: #999; font-family: 'Courier New', Courier, monospace; font-size: 11px; letter-spacing: 0.3px;
             overflow-wrap: anywhere; word-break: break-word;
         }
@@ -2034,8 +2037,8 @@ function setArchiveRenderLimit(value) {
             overflow-y: auto; overflow-x: hidden;
             overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
             margin: 0 24px 22px; padding-left: 14px;
-            border-left: 3px solid rgba(164, 80, 80, 0.5);
-            color: #333; font-size: 14px; line-height: 1.9;
+            border-left: 3px solid rgba(var(--sa-accent-rgb, 164, 80, 80), 0.5);
+            color: var(--sa-ink-strong, #333); font-size: 14px; line-height: 1.9;
             white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
         }
         @keyframes quoteFadeIn { from { opacity: 0; } to { opacity: 1; } }
@@ -2043,10 +2046,10 @@ function setArchiveRenderLimit(value) {
 
         .highlight-mes { animation: quoteBreathe 2s ease-in-out; }
         @keyframes quoteBreathe {
-            0% { background-color: rgba(164, 80, 80, 0); box-shadow: inset 0 0 0 0 rgba(164, 80, 80, 0); }
-            30% { background-color: rgba(164, 80, 80, 0.14); box-shadow: inset 0 0 0 1px rgba(164, 80, 80, 0.5), 0 0 18px rgba(164, 80, 80, 0.18); }
-            65% { background-color: rgba(164, 80, 80, 0.05); box-shadow: inset 0 0 0 1px rgba(164, 80, 80, 0.25), 0 0 8px rgba(164, 80, 80, 0.1); }
-            100% { background-color: rgba(164, 80, 80, 0); box-shadow: inset 0 0 0 0 rgba(164, 80, 80, 0); }
+            0% { background-color: rgba(var(--sa-accent-rgb, 164, 80, 80), 0); box-shadow: inset 0 0 0 0 rgba(var(--sa-accent-rgb, 164, 80, 80), 0); }
+            30% { background-color: rgba(var(--sa-accent-rgb, 164, 80, 80), 0.14); box-shadow: inset 0 0 0 1px rgba(var(--sa-accent-rgb, 164, 80, 80), 0.5), 0 0 18px rgba(var(--sa-accent-rgb, 164, 80, 80), 0.18); }
+            65% { background-color: rgba(var(--sa-accent-rgb, 164, 80, 80), 0.05); box-shadow: inset 0 0 0 1px rgba(var(--sa-accent-rgb, 164, 80, 80), 0.25), 0 0 8px rgba(var(--sa-accent-rgb, 164, 80, 80), 0.1); }
+            100% { background-color: rgba(var(--sa-accent-rgb, 164, 80, 80), 0); box-shadow: inset 0 0 0 0 rgba(var(--sa-accent-rgb, 164, 80, 80), 0); }
         }
     `;
     document.head.appendChild(style);
@@ -5003,7 +5006,7 @@ function setArchiveRenderLimit(value) {
                 flex-direction: column;
                 min-height: 0;
                 overflow: hidden;
-                background: var(--SmartThemeBlurTintColor, #FDFBF7);
+                background: var(--SmartThemeBlurTintColor, var(--sa-paper, #FDFBF7));
             }
 
             #plot-index-head {
@@ -5013,7 +5016,7 @@ function setArchiveRenderLimit(value) {
                 padding: 18px 28px 12px;
                 box-sizing: border-box;
                 display: flex; align-items: center; gap: 12px;
-                border-bottom: 1px dashed rgba(164, 80, 80, 0.3);
+                border-bottom: 1px dashed rgba(var(--sa-accent-rgb, 164, 80, 80), 0.3);
                 background: rgba(128, 128, 128, 0.08);
                 background: color-mix(in srgb, var(--SmartThemeBodyColor) 5%, transparent);
             }
@@ -5036,13 +5039,13 @@ function setArchiveRenderLimit(value) {
                 width: 30px; height: 30px; padding: 0;
                 border: 0; border-radius: 6px;
                 background: transparent;
-                color: #a45050;
+                color: var(--sa-accent, #a45050);
                 font-family: Arial, sans-serif;
                 font-size: 22px; line-height: 1;
                 cursor: pointer;
                 transition: color 0.2s, background 0.2s;
             }
-            #plot-index-close:hover { color: #8b3a3a; background: rgba(164, 80, 80, 0.1); }
+            #plot-index-close:hover { color: var(--sa-accent-deep, #8b3a3a); background: rgba(var(--sa-accent-rgb, 164, 80, 80), 0.1); }
 
             #plot-index-searchbar {
                 flex: 0 0 auto;
@@ -5056,7 +5059,7 @@ function setArchiveRenderLimit(value) {
                 align-items: center;
                 height: 28px;
                 border: 0;
-                border-bottom: 0.5px solid rgba(164, 80, 80, 0.32);
+                border-bottom: 0.5px solid rgba(var(--sa-accent-rgb, 164, 80, 80), 0.32);
                 background: transparent;
             }
             .plot-index-search-input {
@@ -5077,7 +5080,7 @@ function setArchiveRenderLimit(value) {
                 font-style: italic;
             }
             .plot-index-search-box:focus-within {
-                border-bottom-color: rgba(164, 80, 80, 0.6);
+                border-bottom-color: rgba(var(--sa-accent-rgb, 164, 80, 80), 0.6);
             }
             .plot-index-search-reset {
                 flex: 0 0 auto;
@@ -5086,13 +5089,13 @@ function setArchiveRenderLimit(value) {
                 padding: 0 6px;
                 border: 0;
                 background: transparent;
-                color: rgba(164, 80, 80, 0.7);
+                color: rgba(var(--sa-accent-rgb, 164, 80, 80), 0.7);
                 font-size: 11px;
                 cursor: pointer;
                 transition: color 0.2s, background 0.2s;
             }
             .plot-index-search-reset:hover {
-                color: #a45050;
+                color: var(--sa-accent, #a45050);
                 background: transparent;
             }
 
@@ -5122,16 +5125,16 @@ function setArchiveRenderLimit(value) {
                 display: block;
                 margin: 14px auto 20px;
                 padding: 6px 18px;
-                border: 1px solid rgba(164, 80, 80, 0.3);
+                border: 1px solid rgba(var(--sa-accent-rgb, 164, 80, 80), 0.3);
                 border-radius: 4px;
                 background: transparent;
-                color: #a45050;
+                color: var(--sa-accent, #a45050);
                 font-family: 'Courier New', Courier, monospace;
                 font-size: 11px;
                 letter-spacing: 1px;
                 cursor: pointer;
             }
-            .plot-index-search-more:hover { background: rgba(164, 80, 80, 0.08); }
+            .plot-index-search-more:hover { background: rgba(var(--sa-accent-rgb, 164, 80, 80), 0.08); }
             .plot-index-search-empty {
                 margin: 24px auto;
                 padding: 12px;
@@ -5141,8 +5144,8 @@ function setArchiveRenderLimit(value) {
                 color: color-mix(in srgb, var(--SmartThemeBodyColor) 60%, transparent);
             }
             .plot-index-hit {
-                color: #b24747;
-                background: rgba(164, 80, 80, 0.16);
+                color: var(--sa-accent-bright, #b24747);
+                background: rgba(var(--sa-accent-rgb, 164, 80, 80), 0.16);
                 border-radius: 2px;
                 padding: 0 1px;
                 font-weight: 600;
@@ -5180,9 +5183,9 @@ function setArchiveRenderLimit(value) {
                 margin: 0;
                 padding: 8px 12px;
                 border: 0;
-                border-left: 2px solid #a45050;
+                border-left: 2px solid var(--sa-accent, #a45050);
                 border-radius: 6px;
-                background: rgba(164, 80, 80, 0.1);
+                background: rgba(var(--sa-accent-rgb, 164, 80, 80), 0.1);
                 background: color-mix(in srgb, var(--SmartThemeBodyColor) 5%, transparent);
                 color: var(--SmartThemeBodyColor);
                 box-shadow: 0 2px 8px rgba(0, 0, 0, 0.03);
@@ -5222,7 +5225,7 @@ function setArchiveRenderLimit(value) {
                 background: color-mix(in srgb, var(--SmartThemeBodyColor) 8%, transparent);
             }
             .plot-index-bubble:hover {
-                background: rgba(164, 80, 80, 0.16);
+                background: rgba(var(--sa-accent-rgb, 164, 80, 80), 0.16);
                 background: color-mix(in srgb, var(--SmartThemeBodyColor) 10%, transparent);
                 box-shadow: 0 4px 12px rgba(0, 0, 0, 0.06);
             }

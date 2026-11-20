@@ -13,6 +13,8 @@
  * 依赖：SillyTavern 全局上下文 + 浏览器原生 Canvas2D，无第三方库。
  * ============================================================ */
 
+import { openColorPicker } from './color-picker.js';
+
 const CARD = 1080; // 卡片逻辑边长，所有坐标都在这个尺度下计算
 const STATE_KEY = 'st_archive'; // 与 index.js 的 ARCHIVE_STATE_KEY 保持一致
 const EXPORT_SETTINGS_KEY = 'st_archive_export'; // 导出偏好（模板/字号/字体/配色）
@@ -101,6 +103,7 @@ function rgba(hex, alpha) {
     const { r, g, b } = hexToRgb(hex);
     return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
+
 
 function mixColor(from, to, ratio) {
     const a = hexToRgb(from);
@@ -1174,6 +1177,26 @@ function makeTheme(template, colors) {
     };
 }
 
+/**
+ * 读取外观设置（theme.js）落到 :root 的变量。
+ * 外观还是默认值时返回 null —— 这样卡片的默认样子和之前完全一样；
+ * 一旦用户改过配色，卡片就跟着主题走，不至于"界面绿了、卡片还是红的"。
+ */
+function readGlobalPalette() {
+    try {
+        const style = getComputedStyle(document.documentElement);
+        const read = (name) => String(style.getPropertyValue(name) || '').trim().toLowerCase();
+        const accent = read('--sa-accent');
+        const paper = read('--sa-paper');
+        const ink = read('--sa-ink');
+        if (!accent || !paper || !ink) return null;
+        if (accent === '#a45050' && paper === '#fdfbf7' && ink === '#4a4a4a') return null;
+        return { accent, paper, ink };
+    } catch (error) {
+        return null;
+    }
+}
+
 // ============================================================
 // 五、渲染入口
 // ============================================================
@@ -1462,7 +1485,13 @@ const UI_CSS = `
 }
 #quote-detail-overlay .sa-detail-export:hover {
     color: var(--sa-accent-deep, #8b3a3a);
-    background: var(--sa-accent-08, rgba(164, 80, 80, .08));
+    background: rgba(var(--sa-accent-rgb, 164, 80, 80), 0.08);
+}
+/* 详情弹窗一打开焦点会落在第一个可聚焦元素（就是这个按钮），别让它自带黑框 */
+#quote-detail-overlay .sa-detail-export:focus { outline: none; }
+#quote-detail-overlay .sa-detail-export:focus-visible {
+    outline: 1px solid rgba(var(--sa-accent-rgb, 164, 80, 80), 0.55);
+    outline-offset: 2px;
 }
 
 #sa-export-overlay {
@@ -1492,7 +1521,7 @@ const UI_CSS = `
     max-height: min(92dvh, 100%);
     margin: auto;
     background: var(--sa-paper, #FDFBF7);
-    border: 1px solid var(--sa-accent-40, rgba(164, 80, 80, .4));
+    border: 1px solid rgba(var(--sa-accent-rgb, 164, 80, 80), 0.40);
     border-radius: 14px;
     overflow: hidden;
     color: var(--sa-ink, #4A4A4A);
@@ -1508,7 +1537,7 @@ const UI_CSS = `
     flex-shrink: 0;
     display: flex; align-items: center; gap: 8px;
     padding: 12px 14px 10px;
-    border-bottom: 1px dashed var(--sa-accent-22, rgba(164, 80, 80, .22));
+    border-bottom: 1px dashed rgba(var(--sa-accent-rgb, 164, 80, 80), 0.22);
 }
 #sa-export-overlay .sa-export-back,
 #sa-export-overlay .sa-export-close {
@@ -1524,13 +1553,13 @@ const UI_CSS = `
 #sa-export-overlay .sa-export-back[hidden] { display: none; }
 #sa-export-overlay .sa-export-back:hover,
 #sa-export-overlay .sa-export-close:hover {
-    background: var(--sa-accent-10, rgba(164, 80, 80, .1));
+    background: rgba(var(--sa-accent-rgb, 164, 80, 80), 0.10);
 }
 /* 弹层里不需要浏览器默认的粗黑焦点框，键盘操作时给一条细线即可 */
 #sa-export-overlay button:focus,
 #sa-export-overlay .sa-export-panel:focus { outline: none; }
 #sa-export-overlay button:focus-visible {
-    outline: 1.5px solid var(--sa-accent-50, rgba(164, 80, 80, .5));
+    outline: 1.5px solid rgba(var(--sa-accent-rgb, 164, 80, 80), 0.50);
     outline-offset: 2px;
 }
 #sa-export-overlay button svg { display: block; pointer-events: none; }
@@ -1542,7 +1571,7 @@ const UI_CSS = `
 }
 #sa-export-overlay .sa-export-sub {
     margin-top: 3px; font-size: 10px; letter-spacing: .6px;
-    color: var(--sa-ink-45, rgba(74, 74, 74, .45));
+    color: rgba(var(--sa-ink-rgb, 74, 74, 74), 0.45);
     font-family: 'Courier New', Courier, monospace;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
@@ -1564,13 +1593,13 @@ const UI_CSS = `
 #sa-export-overlay .sa-tpl {
     display: block; width: 100%;
     padding: 8px; border-radius: 10px;
-    border: 1px solid var(--sa-accent-18, rgba(164, 80, 80, .18));
+    border: 1px solid rgba(var(--sa-accent-rgb, 164, 80, 80), 0.18);
     background: rgba(255, 255, 255, .35);
     cursor: pointer; text-align: left;
     transition: border-color .18s, background .18s, transform .18s;
 }
 #sa-export-overlay .sa-tpl:hover {
-    border-color: var(--sa-accent-50, rgba(164, 80, 80, .5));
+    border-color: rgba(var(--sa-accent-rgb, 164, 80, 80), 0.50);
     background: rgba(255, 255, 255, .7);
 }
 #sa-export-overlay .sa-tpl:active { transform: scale(.985); }
@@ -1586,7 +1615,7 @@ const UI_CSS = `
 }
 #sa-export-overlay .sa-tpl-desc {
     margin-top: 2px; font-size: 9.5px; letter-spacing: .2px;
-    color: var(--sa-ink-45, rgba(74, 74, 74, .45));
+    color: rgba(var(--sa-ink-rgb, 74, 74, 74), 0.45);
     font-family: 'Courier New', Courier, monospace;
 }
 
@@ -1604,7 +1633,7 @@ const UI_CSS = `
 }
 #sa-export-overlay .sa-zoom-hint {
     font-size: 9.5px; letter-spacing: 1px;
-    color: var(--sa-ink-35, rgba(74, 74, 74, .35));
+    color: rgba(var(--sa-ink-rgb, 74, 74, 74), 0.35);
     font-family: 'Courier New', Courier, monospace;
 }
 
@@ -1628,7 +1657,7 @@ const UI_CSS = `
 #sa-export-overlay .sa-row-label {
     flex-shrink: 0; width: 40px;
     font-size: 11px; letter-spacing: 1.4px;
-    color: var(--sa-ink-55, rgba(74, 74, 74, .55));
+    color: rgba(var(--sa-ink-rgb, 74, 74, 74), 0.55);
 }
 #sa-export-overlay .sa-seg,
 #sa-export-overlay .sa-chips {
@@ -1638,51 +1667,63 @@ const UI_CSS = `
 #sa-export-overlay .sa-chips button {
     appearance: none; -webkit-appearance: none;
     min-width: 44px; height: 28px; padding: 0 10px;
-    border: 1px solid var(--sa-accent-18, rgba(164, 80, 80, .18));
+    border: 1px solid rgba(var(--sa-accent-rgb, 164, 80, 80), 0.18);
     border-radius: 6px;
     background: transparent;
-    color: var(--sa-ink-60, rgba(74, 74, 74, .6));
+    color: rgba(var(--sa-ink-rgb, 74, 74, 74), 0.60);
     font-family: inherit; font-size: 11.5px; letter-spacing: .8px;
     cursor: pointer; box-shadow: none;
     transition: all .18s;
 }
 #sa-export-overlay .sa-seg button:hover,
 #sa-export-overlay .sa-chips button:hover {
-    border-color: var(--sa-accent-45, rgba(164, 80, 80, .45));
+    border-color: rgba(var(--sa-accent-rgb, 164, 80, 80), 0.45);
     color: var(--sa-accent-deep, #8b3a3a);
 }
 #sa-export-overlay .sa-seg button.is-on,
 #sa-export-overlay .sa-chips button.is-on {
-    background: var(--sa-accent-10, rgba(164, 80, 80, .1));
-    border-color: var(--sa-accent-55, rgba(164, 80, 80, .55));
+    background: rgba(var(--sa-accent-rgb, 164, 80, 80), 0.10);
+    border-color: rgba(var(--sa-accent-rgb, 164, 80, 80), 0.55);
     color: var(--sa-accent-deep, #8b3a3a);
     font-weight: 600;
 }
-#sa-export-overlay .sa-colors { display: flex; gap: 8px; flex: 1; align-items: center; }
+#sa-export-overlay .sa-colors { display: flex; gap: 8px; flex: 1; align-items: center; flex-wrap: wrap; }
+#sa-export-overlay .sa-color-badge {
+    font-size: 9.5px; letter-spacing: .6px; line-height: 1.6;
+    padding: 2px 8px; border-radius: 10px;
+    color: rgba(var(--sa-accent-rgb, 164, 80, 80), .9);
+    border: 1px solid rgba(var(--sa-accent-rgb, 164, 80, 80), .32);
+    background: rgba(var(--sa-accent-rgb, 164, 80, 80), .07);
+    white-space: nowrap;
+}
+#sa-export-overlay .sa-color-badge[hidden] { display: none; }
 #sa-export-overlay .sa-color {
     display: inline-flex; align-items: center; gap: 5px;
     padding: 3px 7px 3px 5px;
-    border: 1px solid var(--sa-accent-18, rgba(164, 80, 80, .18));
+    border: 1px solid rgba(var(--sa-accent-rgb, 164, 80, 80), 0.18);
     border-radius: 6px;
     font-size: 10.5px; letter-spacing: .6px;
-    color: var(--sa-ink-55, rgba(74, 74, 74, .55));
+    color: rgba(var(--sa-ink-rgb, 74, 74, 74), 0.55);
     cursor: pointer;
 }
-#sa-export-overlay .sa-color input[type="color"] {
-    width: 22px; height: 20px; padding: 0; border: 0;
-    border-radius: 4px; background: none; cursor: pointer;
+#sa-export-overlay .sa-color-dot {
+    width: 18px; height: 18px; border-radius: 4px;
+    border: 1px solid rgba(0, 0, 0, .18);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .35);
 }
+
+
 #sa-export-overlay .sa-color-reset {
     appearance: none; -webkit-appearance: none;
     height: 26px; padding: 0 8px;
-    border: 1px dashed var(--sa-accent-30, rgba(164, 80, 80, .3));
+    border: 1px dashed rgba(var(--sa-accent-rgb, 164, 80, 80), 0.30);
     border-radius: 6px; background: transparent;
-    color: var(--sa-ink-45, rgba(74, 74, 74, .45));
+    color: rgba(var(--sa-ink-rgb, 74, 74, 74), 0.45);
     font-family: inherit; font-size: 10.5px; cursor: pointer; box-shadow: none;
 }
 #sa-export-overlay .sa-hint {
     margin-top: 14px; font-size: 9.5px; line-height: 1.6;
-    color: var(--sa-ink-35, rgba(74, 74, 74, .35));
+    color: rgba(var(--sa-ink-rgb, 74, 74, 74), 0.35);
     font-family: 'Courier New', Courier, monospace;
 }
 #sa-export-overlay .sa-note {
@@ -1710,12 +1751,12 @@ const UI_CSS = `
     flex-shrink: 0;
     display: flex; gap: 8px;
     padding: 10px 14px 12px;
-    border-top: 1px dashed var(--sa-accent-22, rgba(164, 80, 80, .22));
+    border-top: 1px dashed rgba(var(--sa-accent-rgb, 164, 80, 80), 0.22);
 }
 #sa-export-overlay .sa-btn {
     appearance: none; -webkit-appearance: none;
     flex: 1; height: 38px; padding: 0 12px;
-    border: 1px solid var(--sa-accent-40, rgba(164, 80, 80, .4));
+    border: 1px solid rgba(var(--sa-accent-rgb, 164, 80, 80), 0.40);
     border-radius: 8px;
     background: transparent;
     color: var(--sa-accent-deep, #8b3a3a);
@@ -1724,10 +1765,10 @@ const UI_CSS = `
     display: inline-flex; align-items: center; justify-content: center; gap: 6px;
     transition: background .18s, color .18s, opacity .18s;
 }
-#sa-export-overlay .sa-btn:hover { background: var(--sa-accent-08, rgba(164, 80, 80, .08)); }
-#sa-export-overlay .sa-btn:active { background: var(--sa-accent-16, rgba(164, 80, 80, .16)); }
+#sa-export-overlay .sa-btn:hover { background: rgba(var(--sa-accent-rgb, 164, 80, 80), 0.08); }
+#sa-export-overlay .sa-btn:active { background: rgba(var(--sa-accent-rgb, 164, 80, 80), 0.16); }
 #sa-export-overlay .sa-btn.is-primary {
-    background: var(--sa-accent-85, rgba(164, 80, 80, .85));
+    background: rgba(var(--sa-accent-rgb, 164, 80, 80), 0.85);
     border-color: transparent;
     color: #fff;
 }
@@ -1974,12 +2015,18 @@ class ExportPanel {
         paintNext(0);
     }
 
-    appearanceFor(templateId) {
+    /** 当前模板实际生效的三色：模板默认 ← 外观主题 ← 该模板的手动覆盖 */
+    effectiveColors(templateId) {
         const template = TEMPLATE_BY_ID[templateId] || TEMPLATES[0];
+        const global = readGlobalPalette();
+        return { ...template.defaults, ...(global || {}), ...(this.settings.colors[templateId] || {}) };
+    }
+
+    appearanceFor(templateId) {
         return {
             sizeKey: this.settings.sizeKey,
             fontKey: this.settings.fontKey,
-            colors: { ...template.defaults, ...(this.settings.colors[templateId] || {}) },
+            colors: this.effectiveColors(templateId),
         };
     }
 
@@ -2025,24 +2072,31 @@ class ExportPanel {
             { key: 'accent', label: '强调' },
         ];
         this.colorInputs = {};
+        this.colorDots = {};
         slots.forEach(slot => {
-            const wrapper = document.createElement('label');
-            wrapper.className = 'sa-color';
-            const input = document.createElement('input');
-            input.type = 'color';
-            input.dataset.slot = slot.key;
+            // 不用原生 <input type=color>：安卓上会弹系统取色器，样式完全不归我们管
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'sa-color';
+            button.dataset.slot = slot.key;
+            const dot = document.createElement('span');
+            dot.className = 'sa-color-dot';
             const label = document.createElement('span');
             label.textContent = slot.label;
-            wrapper.appendChild(input);
-            wrapper.appendChild(label);
-            colorBox.appendChild(wrapper);
-            this.colorInputs[slot.key] = input;
+            button.appendChild(dot);
+            button.appendChild(label);
+            colorBox.appendChild(button);
+            this.colorDots[slot.key] = dot;
 
-            input.addEventListener('input', () => {
-                this.setColor(slot.key, input.value);
-            });
-            input.addEventListener('change', () => {
-                this.setColor(slot.key, input.value);
+            button.addEventListener('click', () => {
+                openColorPicker({
+                    title: `选择颜色 · ${slot.label}`,
+                    value: this.effectiveColors(this.settings.templateId)[slot.key],
+                    onConfirm: (hex) => {
+                        this.setColor(slot.key, hex);
+                        this.syncColorInputs();
+                    },
+                });
             });
         });
 
@@ -2058,12 +2112,20 @@ class ExportPanel {
             this.repaintAdjust();
         });
         colorBox.appendChild(reset);
+
+        // 该模板被单独改过色时给个标记，免得「为什么这个模板不跟主题」找不到原因
+        const badge = document.createElement('span');
+        badge.className = 'sa-color-badge';
+        badge.hidden = true;
+        badge.textContent = '已自定义';
+        badge.title = '这个模板的配色被单独改过；点「恢复默认」可回到主题色';
+        colorBox.appendChild(badge);
+        this.$colorBadge = badge;
     }
 
     setColor(slot, value) {
         const id = this.settings.templateId;
-        const template = TEMPLATE_BY_ID[id];
-        const next = { ...template.defaults, ...(this.settings.colors[id] || {}) };
+        const next = this.effectiveColors(id);
         next[slot] = value;
         this.settings.colors[id] = next;
         saveExportSettings({ colors: this.settings.colors });
@@ -2081,11 +2143,13 @@ class ExportPanel {
     }
 
     syncColorInputs() {
-        const template = TEMPLATE_BY_ID[this.settings.templateId] || TEMPLATES[0];
-        const colors = { ...template.defaults, ...(this.settings.colors[this.settings.templateId] || {}) };
-        Object.keys(this.colorInputs || {}).forEach(slot => {
-            this.colorInputs[slot].value = colors[slot];
+        const colors = this.effectiveColors(this.settings.templateId);
+        Object.keys(this.colorDots || {}).forEach(slot => {
+            this.colorDots[slot].style.background = colors[slot];
         });
+        if (this.$colorBadge) {
+            this.$colorBadge.hidden = !this.settings.colors[this.settings.templateId];
+        }
     }
 
     repaintAdjust() {
