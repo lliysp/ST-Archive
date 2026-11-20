@@ -343,7 +343,7 @@ function setArchiveRenderLimit(value) {
 })();
 
 (function () {
-    console.log("✨ [ST-档案馆] v1.6.0 索引搜索版已启动！");
+    console.log("✨ [ST-档案馆] v1.7.0 卡片导出版已启动！");
 
     function escapeHtml(value) {
         return String(value ?? '').replace(/[&<>"']/g, char => ({
@@ -5881,3 +5881,8 @@ function setArchiveRenderLimit(value) {
     // 7. 启动同步引擎：事件驱动 + 只处理可见消息，不再有每秒全量扫描
     startQuoteRuntime();
 })();
+
+// 卡片导出（独立文件 export.js，只做附加，不改动上面的任何逻辑）
+import('./export.js').catch(error => {
+    console.error('[ST-档案馆] 卡片导出模块加载失败', error);
+});
