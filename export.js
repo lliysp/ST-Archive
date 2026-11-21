@@ -15,10 +15,13 @@
 
 import { openColorPicker } from './color-picker.js';
 
-const CARD = 1080; // 卡片逻辑边长，所有坐标都在这个尺度下计算
+const CARD = 1080; // 兼容旧调用：默认设计宽度
+const CARD_W = 1080; // 卡片逻辑宽度；宽度不是硬约束，模板按它布局
+const CARD_H_MIN = 1080; // 短文本仍保持方形
+const CARD_H_MAX = 1920; // 16:9 竖屏上限；导出最高 3840，避开 iOS 4096 限制
 const STATE_KEY = 'st_archive'; // 与 index.js 的 ARCHIVE_STATE_KEY 保持一致
 const EXPORT_SETTINGS_KEY = 'st_archive_export'; // 导出偏好（模板/字号/字体/配色）
-const EXPORT_PIXEL_RATIO = 2; // 导出倍率：1080 → 2160
+const EXPORT_PIXEL_RATIO = 2; // 导出倍率：1080 → 2160，最高 2160×3840
 const TOAST_MS = 2200;
 
 // 设计稿里固定出现的装饰文案（不属于真实数据，按图照抄）
@@ -139,6 +142,8 @@ function setFont(ctx, size, stack, weight = '400', style = 'normal') {
 
 function measureTracked(ctx, str, tracking = 0) {
     if (!str) return 0;
+    // 没有字距时整串一次量完：比逐字相加快得多，也更接近实际 fillText 的宽度
+    if (!tracking) return ctx.measureText(str).width;
     let width = 0;
     for (const ch of str) width += ctx.measureText(ch).width + tracking;
     return width;
@@ -216,6 +221,17 @@ function wrapText(ctx, str, maxWidth, size, stack, weight, tracking, style = 'no
     const lines = [];
     const paragraphs = String(str ?? '').split(/\r?\n/);
 
+    // 同一次断行里同一个字/词会反复出现（中文尤其明显），量一次就够。
+    const widthCache = new Map();
+    const widthOf = (unit) => {
+        let w = widthCache.get(unit);
+        if (w === undefined) {
+            w = tracking ? measureTracked(ctx, unit, tracking) : ctx.measureText(unit).width;
+            widthCache.set(unit, w);
+        }
+        return w;
+    };
+
     for (const para of paragraphs) {
         if (!para.trim()) {
             lines.push('');
@@ -231,16 +247,17 @@ function wrapText(ctx, str, maxWidth, size, stack, weight, tracking, style = 'no
             if (unit === ' ') {
                 if (!hasContent) continue; // 行首空格丢掉
                 line += unit;
-                lineWidth += ctx.measureText(unit).width + tracking;
+                lineWidth += widthOf(unit);
                 continue;
             }
 
-            const unitWidth = measureTracked(ctx, unit, tracking);
+            const unitWidth = widthOf(unit);
+            const unitChars = Array.from(unit);
 
             // 超长英文串直接按字硬断，避免戳出卡片
-            if (unitWidth > maxWidth && Array.from(unit).length > 1) {
-                for (const ch of Array.from(unit)) {
-                    const chWidth = ctx.measureText(ch).width + tracking;
+            if (unitWidth > maxWidth && unitChars.length > 1) {
+                for (const ch of unitChars) {
+                    const chWidth = widthOf(ch);
                     if (lineWidth + chWidth > maxWidth && hasContent) {
                         lines.push(line.replace(/\s+$/, ''));
                         line = ch;
@@ -286,41 +303,80 @@ function isLastRenderTruncated() {
     return lastRenderTruncated;
 }
 
+// 布局阶段用的离屏上下文：只做文字测量，不参与最终绘制。
+let measureContext = null;
+function getMeasureContext() {
+    if (measureContext) return measureContext;
+    const canvas = document.createElement('canvas');
+    canvas.width = 8;
+    canvas.height = 8;
+    measureContext = canvas.getContext('2d');
+    return measureContext;
+}
+
+// 按指定倍率排一次：字号、行高、断行结果。
+function layoutAtScale(ctx, str, o, scale) {
+    const size = o.size * scale;
+    const lh = o.lineGap ?? (size * (o.lineHeight ?? 1.85));
+    const lines = wrapText(ctx, str, o.width, size, o.stack, o.weight, o.tracking || 0, o.style || 'normal');
+    return { size, lh, lines };
+}
+
 /**
  * 自适应字号：从基准字号往下收，直到行数 * 行高放得下。
  * 收到下限还放不下就截断并补省略号（不出长图）。
+ *
+ * 不再从 1 开始每 0.045 试一遍：先按「高度 ≈ 字号²」估一个接近的倍率，
+ * 再往下微调。超长文本通常一两次排版就能判定要截断，手机上少卡很多。
  */
-function fitTextBlock(ctx, str, o) {
-    const { width, maxHeight, stack, weight, tracking = 0, lineHeight = 1.85, minScale = 0.6, style = 'normal' } = o;
-    const baseSize = o.size;
+function fitTextBlock(ctx, str, o, base = null) {
+    const { maxHeight, minScale = 0.6 } = o;
 
-    // lineGap：固定行距（信纸要正好压在横格线上）；不传就按字号的倍数算
-    const gapOf = (size) => o.lineGap ?? (size * lineHeight);
+    const first = base || layoutAtScale(ctx, str, o, 1);
+    if (first.lines.length * first.lh <= maxHeight) {
+        return { ...first, truncated: false };
+    }
 
-    let candidate = null;
-    for (let scale = 1; scale >= minScale - 1e-6; scale -= 0.045) {
-        const size = baseSize * scale;
-        const lh = gapOf(size);
-        const lines = wrapText(ctx, str, width, size, stack, weight, tracking, style);
-        candidate = { size, lh, lines };
-        if (lines.length * lh <= maxHeight) {
+    // 固定行距（信纸）时高度随字号线性变化；普通行高时高度约与字号平方成正比
+    const actualH = Math.max(1, first.lines.length * first.lh);
+    const targetH = Math.max(1, maxHeight);
+    const estimate = o.lineGap != null
+        ? targetH / actualH
+        : Math.sqrt(targetH / actualH);
+
+    // 从估算值上方一点开始往下扫，估偏了也能兜住
+    let start = Math.min(1, Math.max(0, estimate) * 1.12 + 0.02);
+    for (let scale = start; scale >= minScale - 1e-6; scale -= 0.045) {
+        const candidate = layoutAtScale(ctx, str, o, scale);
+        if (candidate.lines.length * candidate.lh <= maxHeight) {
             return { ...candidate, truncated: false };
         }
     }
 
     // 收到下限仍然放不下：截断
-    const size = baseSize * minScale;
-    const lh = gapOf(size);
+    const last = layoutAtScale(ctx, str, o, minScale);
+    const { size, lh } = last;
     const maxLines = Math.max(1, Math.floor(maxHeight / lh));
-    let lines = wrapText(ctx, str, width, size, stack, weight, tracking, style);
+    let lines = last.lines;
     const truncated = lines.length > maxLines;
     if (truncated) {
-        lastRenderTruncated = true;
         lines = lines.slice(0, maxLines);
-        const last = lines[maxLines - 1] ?? '';
-        lines[maxLines - 1] = ellipsize(ctx, last, width, size, stack, weight, tracking, style);
+        const tail = lines[maxLines - 1] ?? '';
+        lines[maxLines - 1] = ellipsize(ctx, tail, o.width, size, o.stack, o.weight, o.tracking || 0, o.style || 'normal');
     }
     return { size, lh, lines, truncated };
+}
+
+/**
+ * 可变高度版：先按基准字号完整排版，放得下就保留原字号；
+ * 只有超过 maxHeight 时才缩字号，缩到下限仍放不下才截断。
+ */
+function fitTextBlockAuto(ctx, str, o) {
+    const first = layoutAtScale(ctx, str, o, 1);
+    if (first.lines.length * first.lh <= o.maxHeight) {
+        return { ...first, truncated: false };
+    }
+    return fitTextBlock(ctx, str, o, first);
 }
 
 function ellipsize(ctx, line, width, size, stack, weight, tracking, style = 'normal') {
@@ -673,9 +729,29 @@ function drawAvatarFallback(ctx, x, y, w, h, radius, char, t) {
  * 模板 1 · 档案馆原生
  * 无头像；标题 / 元信息 / 竖条正文 / 右下「—— user 摘」
  */
-function drawArchive(ctx, d, t) {
+function layoutArchive(ctx, d, maxHeight) {
+    const scale = d.font.scale;
+    const block = fitTextBlockAuto(ctx, d.text, {
+        width: 852,
+        maxHeight: Math.max(1, maxHeight - 392 - 140),
+        size: 42 * scale,
+        lineHeight: 1.9,
+        stack: d.font.stack,
+        weight: '400',
+        tracking: 0.4,
+    });
+    const bodyH = block.lines.length * block.lh;
+    const height = Math.max(CARD_H_MIN, Math.min(maxHeight, 392 + bodyH + 140));
+    return { height, block, bodyH };
+}
+
+function drawArchive(ctx, d, t, layout) {
+    const height = layout.height;
+    const block = layout.block;
+    const bodyH = layout.bodyH;
+
     ctx.fillStyle = t.paper;
-    ctx.fillRect(0, 0, CARD, CARD);
+    ctx.fillRect(0, 0, CARD_W, height);
 
     const scale = d.font.scale;
 
@@ -719,23 +795,11 @@ function drawArchive(ctx, d, t) {
 
     dashedLine(ctx, 104, 300, 976, 300, rgba(t.accent, 0.3), 2, [7, 9]);
 
-    // 正文
-    const block = fitTextBlock(ctx, d.text, {
-        width: 852,
-        maxHeight: 548,
-        size: 42 * scale,
-        lineHeight: 1.9,
-        stack: d.font.stack,
-        weight: '400',
-        tracking: 0.4,
-    });
-
     // 竖条跟着正文走：从第一行上沿到末行下沿
-    const blockHeight = block.lines.length * block.lh;
     const barTop = 392 + (block.lh - block.size) / 2 - 8;
     ctx.save();
     ctx.fillStyle = rgba(t.accent, 0.6);
-    roundRectPath(ctx, 76, barTop, 12, blockHeight - 10, 6);
+    roundRectPath(ctx, 76, barTop, 12, Math.max(2, bodyH - 10), 6);
     ctx.fill();
     ctx.restore();
 
@@ -747,7 +811,7 @@ function drawArchive(ctx, d, t) {
     });
 
     // 落款
-    text(ctx, `—— ${d.user} 摘`, 976, 1004, {
+    text(ctx, `—— ${d.user} 摘`, 976, height - 76, {
         size: 29 * scale,
         stack: d.font.stack,
         color: rgba(t.accent, 0.9),
@@ -760,9 +824,32 @@ function drawArchive(ctx, d, t) {
  * 模板 2 · 拍立得
  * 顶部圆形头像 + 标题；中间方框正文；互动栏（装饰数字）；底部一行英文
  */
-function drawPolaroid(ctx, d, t) {
+function layoutPolaroid(ctx, d, maxHeight) {
+    const scale = d.font.scale;
+    const maxFrameH = Math.max(608, maxHeight - 254 - 218);
+    const block = fitTextBlockAuto(ctx, d.text, {
+        width: 840,
+        maxHeight: Math.max(1, maxFrameH - 68),
+        size: 44 * scale,
+        lineHeight: 1.85,
+        stack: d.font.stack,
+        weight: '400',
+        tracking: 0.4,
+    });
+    const bodyH = block.lines.length * block.lh;
+    const frameH = Math.max(608, Math.min(maxFrameH, bodyH + 68));
+    const height = Math.max(CARD_H_MIN, Math.min(maxHeight, 254 + frameH + 218));
+    return { height, block, bodyH, frameH };
+}
+
+function drawPolaroid(ctx, d, t, layout) {
+    const height = layout.height;
+    const block = layout.block;
+    const bodyH = layout.bodyH;
+    const frameH = layout.frameH;
+
     ctx.fillStyle = t.paper;
-    ctx.fillRect(0, 0, CARD, CARD);
+    ctx.fillRect(0, 0, CARD_W, height);
 
     const scale = d.font.scale;
 
@@ -770,7 +857,7 @@ function drawPolaroid(ctx, d, t) {
     ctx.save();
     ctx.strokeStyle = rgba(t.accent, 0.45);
     ctx.lineWidth = 3;
-    roundRectPath(ctx, 11, 11, CARD - 22, CARD - 22, 18);
+    roundRectPath(ctx, 11, 11, CARD_W - 22, height - 22, 18);
     ctx.stroke();
     ctx.restore();
 
@@ -831,7 +918,6 @@ function drawPolaroid(ctx, d, t) {
     const frameX = 80;
     const frameY = 254;
     const frameW = 920;
-    const frameH = 608;
     ctx.save();
     ctx.strokeStyle = rgba(t.accent, 0.45);
     ctx.lineWidth = 2;
@@ -842,17 +928,7 @@ function drawPolaroid(ctx, d, t) {
     const textW = frameW - 80;
 
     // 正文（框内上下居中、左对齐）
-    const block = fitTextBlock(ctx, d.text, {
-        width: textW,
-        maxHeight: 540,
-        size: 44 * scale,
-        lineHeight: 1.85,
-        stack: d.font.stack,
-        weight: '400',
-        tracking: 0.4,
-    });
-    const blockHeight = block.lines.length * block.lh;
-    drawTextBlock(ctx, block, textX, frameY + (frameH - blockHeight) / 2, {
+    drawTextBlock(ctx, block, textX, frameY + (frameH - bodyH) / 2, {
         stack: d.font.stack,
         weight: '400',
         color: t.ink,
@@ -861,7 +937,7 @@ function drawPolaroid(ctx, d, t) {
     });
 
     // 互动栏（设计稿装饰数字，不接真实数据）；左边缘和正文左边对齐
-    const rowY = 918;
+    const rowY = height - 162;
     const iconColor = rgba(t.accent, 0.85);
     drawHeart(ctx, textX + 24, rowY - 12, 48, iconColor);
     text(ctx, DECOR_STATS.like, textX + 62, rowY, {
@@ -878,14 +954,14 @@ function drawPolaroid(ctx, d, t) {
         size: 33 * scale, stack: MONO_STACK, color: rgba(t.ink, 0.72), tracking: 0.5,
     });
 
-    dashedLine(ctx, 100, 962, 980, 962, rgba(t.accent, 0.16), 1.4, [4, 7]);
+    dashedLine(ctx, 100, height - 118, 980, height - 118, rgba(t.accent, 0.16), 1.4, [4, 7]);
 
     // 底部一行英文（user 前缀替换为实际用户名，太长时自动缩）
     const decorLine = `${d.user}: ${DECOR_TEXT.polaroid}`;
     const decorSize = fitSingleLine(ctx, decorLine, {
         size: 25 * scale, width: 860, stack: MONO_STACK, weight: '400', tracking: 0.3, minSize: 14,
     });
-    text(ctx, decorLine, 100, 1022, {
+    text(ctx, decorLine, 100, height - 58, {
         size: decorSize,
         stack: MONO_STACK,
         color: rgba(t.ink, 0.42),
@@ -897,14 +973,36 @@ function drawPolaroid(ctx, d, t) {
  * 模板 3 · 信纸
  * 虚线外框 + To user + 横格线（正文写在格子上）+ 右下 char/时间 + 羽毛
  */
-function drawLetter(ctx, d, t) {
+function layoutLetter(ctx, d, maxHeight) {
+    const scale = d.font.scale;
+    const ruleGap = 100;
+    const maxLines = Math.max(7, Math.floor((maxHeight - 380) / ruleGap));
+    const block = fitTextBlockAuto(ctx, d.text, {
+        width: 800,
+        maxHeight: maxLines * ruleGap,
+        size: 36 * scale,
+        lineHeight: 1.85,
+        lineGap: ruleGap,
+        stack: d.font.stack,
+        weight: '400',
+        tracking: 0.4,
+    });
+    const lines = Math.max(1, block.lines.length);
+    const height = Math.max(CARD_H_MIN, Math.min(maxHeight, 380 + lines * ruleGap));
+    return { height, block, ruleCount: Math.max(7, lines) };
+}
+
+function drawLetter(ctx, d, t, layout) {
+    const height = layout.height;
+    const block = layout.block;
+
     ctx.fillStyle = t.paper;
-    ctx.fillRect(0, 0, CARD, CARD);
+    ctx.fillRect(0, 0, CARD_W, height);
 
     const scale = d.font.scale;
 
     // 外框
-    strokeDashRect(ctx, 46, 46, CARD - 92, CARD - 92, rgba(t.accent, 0.45), 2, [7, 7]);
+    strokeDashRect(ctx, 46, 46, CARD_W - 92, height - 92, rgba(t.accent, 0.45), 2, [7, 7]);
 
     // To user
     const toText = `To ${d.user}`;
@@ -939,23 +1037,13 @@ function drawLetter(ctx, d, t) {
     // 横格线
     const ruleTop = 262;
     const ruleGap = 100;
-    const ruleCount = 7;
+    const ruleCount = layout.ruleCount;
     for (let i = 0; i < ruleCount; i++) {
         const y = ruleTop + i * ruleGap;
         dashedLine(ctx, 118, y, 952, y, rgba(t.accent, 0.26), 1.3, [5, 7]);
     }
 
     // 正文：一行一格，正好压在横线上
-    const block = fitTextBlock(ctx, d.text, {
-        width: 800,
-        maxHeight: ruleGap * ruleCount,
-        size: 36 * scale,
-        lineHeight: 1.85,
-        lineGap: ruleGap,
-        stack: d.font.stack,
-        weight: '400',
-        tracking: 0.4,
-    });
     block.lines.forEach((line, index) => {
         const ruleY = ruleTop + index * ruleGap;
         text(ctx, line, 138, ruleY - 22, {
@@ -968,16 +1056,16 @@ function drawLetter(ctx, d, t) {
     });
 
     // 右下落款
-    text(ctx, d.char, 952, 962, {
+    text(ctx, d.char, 952, height - 118, {
         size: 24 * scale, stack: MONO_STACK, color: rgba(t.ink, 0.45), tracking: 0.6, align: 'right',
     });
-    text(ctx, d.time, 952, 1004, {
+    text(ctx, d.time, 952, height - 76, {
         size: 21 * scale, stack: MONO_STACK, color: rgba(t.ink, 0.36), tracking: 0.4, align: 'right',
     });
 
     // 羽毛
     drawFeather(ctx, 986, 470, 152, 0.22, t.accent);
-    drawFeather(ctx, 1000, 792, 110, -0.36, t.accent);
+    drawFeather(ctx, 1000, height - 288, 110, -0.36, t.accent);
 }
 
 /**
@@ -985,33 +1073,66 @@ function drawLetter(ctx, d, t) {
  * 两张纸叠着：下面那张小一圈、转 5°，四个角从上面那张底下露出来。
  * 上面那张再画图钉 / 虚线标题框 / 正文框 / 头像胶带。
  */
-function drawCollage(ctx, d, t) {
+const COLLAGE_SCALE = 960 / CARD_W;
+
+function layoutCollage(ctx, d, maxHeight) {
+    const scale = d.font.scale;
+    const sheetHMax = (maxHeight - 120) / COLLAGE_SCALE;
+    const frameHMax = Math.max(738, sheetHMax - 342);
+    const block = fitTextBlockAuto(ctx, d.text, {
+        width: 522,
+        maxHeight: Math.max(1, frameHMax - 82),
+        size: 46 * scale,
+        lineHeight: 1.85,
+        stack: d.font.stack,
+        weight: '400',
+        tracking: 0.4,
+    });
+    const bodyH = block.lines.length * block.lh;
+    const frameH = Math.max(738, Math.min(frameHMax, bodyH + 82));
+    const sheetH = 342 + frameH;
+    const height = Math.max(CARD_H_MIN, Math.min(maxHeight, 120 + COLLAGE_SCALE * sheetH));
+    return { height, block, bodyH, frameH, sheetH };
+}
+
+function drawCollage(ctx, d, t, layout) {
+    const height = layout.height;
+
     // 纸外的底：纯白，固定不跟配色走
     ctx.fillStyle = '#FFFFFF';
-    ctx.fillRect(0, 0, CARD, CARD);
+    ctx.fillRect(0, 0, CARD_W, height);
 
-    // 下面那张纸：小一圈 + 转 5°，靠边缘线交代它是另一张
+    // 下面那张纸：小一圈 + 转 5°，靠边缘线交代它是另一张。
+    // 卡片变高时把纸略微收窄，保证旋转后的包围盒仍在 1080 宽度内。
+    const tH = Math.max(0, Math.min(1, (height - CARD_H_MIN) / (CARD_H_MAX - CARD_H_MIN)));
+    const backW = 940 - 60 * tH;
+    const backH = height - 140;
+
     ctx.save();
-    ctx.translate(CARD / 2, CARD / 2);
+    ctx.translate(CARD_W / 2, height / 2);
     ctx.rotate(-0.087);
     ctx.fillStyle = t.paper;
-    ctx.fillRect(-470, -470, 940, 940);
+    ctx.fillRect(-backW / 2, -backH / 2, backW, backH);
     ctx.strokeStyle = rgba(t.accent, 0.3);
     ctx.lineWidth = 1.4;
-    ctx.strokeRect(-470, -470, 940, 940);
+    ctx.strokeRect(-backW / 2, -backH / 2, backW, backH);
     ctx.restore();
 
     // 上面那张纸：原来的整张卡内容，整体缩进 60px 让出叠纸的缝
     ctx.save();
     ctx.translate(60, 60);
-    ctx.scale(960 / CARD, 960 / CARD);
-    drawCollageSheet(ctx, d, t);
+    ctx.scale(COLLAGE_SCALE, COLLAGE_SCALE);
+    drawCollageSheet(ctx, d, t, layout);
     ctx.restore();
 }
 
-function drawCollageSheet(ctx, d, t) {
+function drawCollageSheet(ctx, d, t, layout) {
+    const sheetH = layout.sheetH;
+    const block = layout.block;
+    const bodyH = layout.bodyH;
+
     ctx.fillStyle = t.paper;
-    ctx.fillRect(0, 0, CARD, CARD);
+    ctx.fillRect(0, 0, CARD_W, sheetH);
 
     const scale = d.font.scale;
 
@@ -1019,7 +1140,7 @@ function drawCollageSheet(ctx, d, t) {
     ctx.save();
     ctx.strokeStyle = rgba(t.accent, 0.42);
     ctx.lineWidth = 1.6;
-    ctx.strokeRect(34, 34, CARD - 68, CARD - 68);
+    ctx.strokeRect(34, 34, CARD_W - 68, sheetH - 68);
     ctx.restore();
 
     // 标题虚线框
@@ -1030,7 +1151,7 @@ function drawCollageSheet(ctx, d, t) {
         size: 56 * scale, width: 860, stack: d.font.stack, weight: '600', tracking: 3,
     });
     // 基线按「框的视觉中心」推：中文字面大约占 0.88em，中心对齐要往下让 0.38em
-    text(ctx, title, CARD / 2, 62 + 152 / 2 + titleSize * 0.38, {
+    text(ctx, title, CARD_W / 2, 62 + 152 / 2 + titleSize * 0.38, {
         size: titleSize,
         stack: d.font.stack,
         weight: '600',
@@ -1062,21 +1183,11 @@ function drawCollageSheet(ctx, d, t) {
     ctx.stroke();
     ctx.strokeStyle = rgba(t.accent, 0.3);
     ctx.lineWidth = 1.3;
-    ctx.strokeRect(70, 292, 590, 738);
+    ctx.strokeRect(70, 292, 590, layout.frameH);
     ctx.restore();
 
     // 正文：整栏往下排，放不下自动缩字号；短句则垂直居中，避免下半截空一大片
-    const block = fitTextBlock(ctx, d.text, {
-        width: 522,
-        maxHeight: 656,
-        size: 46 * scale,
-        lineHeight: 1.85,
-        stack: d.font.stack,
-        weight: '400',
-        tracking: 0.4,
-    });
-    const blockHeight = block.lines.length * block.lh;
-    drawTextBlock(ctx, block, 104, 334 + (656 - blockHeight) / 2, {
+    drawTextBlock(ctx, block, 104, 334 + (layout.frameH - 82 - bodyH) / 2, {
         stack: d.font.stack,
         weight: '400',
         color: t.ink,
@@ -1104,14 +1215,17 @@ function drawCollageSheet(ctx, d, t) {
         d.char, rgba(t.accent, 0.9), d.font.stack,
     );
 
-    // 右侧英文摘抄
-    text(ctx, `${d.user}:`, boxX, 706, {
+    // 右侧英文摘抄：固定贴在头像下方，不随卡片长高往下漂。
+    const userY = 706;
+    const enTop = userY + 20;
+    text(ctx, `${d.user}:`, boxX, userY, {
         size: 28 * scale, stack: d.font.stack, color: rgba(t.accent, 0.86), tracking: 0.6,
     });
 
     const enBlock = fitTextBlock(ctx, DECOR_TEXT.collage, {
         width: 250,
-        maxHeight: 100,
+        // 方形卡片里也留足位置，把整段英文完整排出来（原来 100 会被截断）
+        maxHeight: Math.max(100, 292 + layout.frameH - enTop - 16),
         size: 20,
         lineHeight: 1.5,
         stack: SERIF_EN,
@@ -1120,7 +1234,7 @@ function drawCollageSheet(ctx, d, t) {
         tracking: 0.2,
         minScale: 0.88,
     });
-    drawTextBlock(ctx, enBlock, boxX, 726, {
+    drawTextBlock(ctx, enBlock, boxX, enTop, {
         stack: SERIF_EN,
         weight: '400',
         style: 'italic',
@@ -1135,6 +1249,7 @@ const TEMPLATES = [
         name: '档案馆',
         desc: '原生样式 · 无头像',
         defaults: { paper: '#FDFBF7', ink: '#3B322D', accent: '#A45050' },
+        layout: layoutArchive,
         draw: drawArchive,
     },
     {
@@ -1142,6 +1257,7 @@ const TEMPLATES = [
         name: '社媒',
         desc: '圆形头像 · 互动栏',
         defaults: { paper: '#FEFCF8', ink: '#3B322D', accent: '#A45050' },
+        layout: layoutPolaroid,
         draw: drawPolaroid,
     },
     {
@@ -1149,6 +1265,7 @@ const TEMPLATES = [
         name: '信纸',
         desc: '横格线 · 羽毛',
         defaults: { paper: '#FCFAF6', ink: '#3B322D', accent: '#A45050' },
+        layout: layoutLetter,
         draw: drawLetter,
     },
     {
@@ -1156,6 +1273,7 @@ const TEMPLATES = [
         name: '小报',
         desc: '头像 · 图钉 · 折角',
         defaults: { paper: '#FDFBF7', ink: '#3B322D', accent: '#A45050' },
+        layout: layoutCollage,
         draw: drawCollage,
     },
 ];
@@ -1202,37 +1320,66 @@ function readGlobalPalette() {
 // ============================================================
 
 /**
- * 把卡片画进一个 canvas。
- * @param {HTMLCanvasElement} canvas
- * @param {number} cssSize 逻辑尺寸（1080 为原尺寸）
+ * 先排版、再决定卡片高度。返回的 layout 会传给对应模板的 draw。
  * @param {'templateId'} templateId
  * @param {object} data 文案数据
  * @param {{sizeKey:string,fontKey:string,colors:object}} appearance
+ * @param {{maxHeight?:number}} options
  */
-function renderCard(canvas, pixelSize, templateId, data, appearance) {
+function layoutCard(templateId, data, appearance, options = {}) {
+    const template = TEMPLATE_BY_ID[templateId] || TEMPLATES[0];
+    const font = FONT_BY_KEY[appearance?.fontKey] || FONT_STYLES[0];
+    const step = SIZE_STEPS.find(item => item.key === appearance?.sizeKey) || SIZE_STEPS[1];
+    const maxHeight = Math.max(CARD_H_MIN, Math.min(CARD_H_MAX, options.maxHeight ?? CARD_H_MAX));
+    const ctx = getMeasureContext();
+    const layout = template.layout(ctx, {
+        ...data,
+        font: { stack: font.stack, key: font.key, scale: step.scale },
+    }, maxHeight);
+    layout.width = CARD_W;
+    layout.truncated = Boolean(layout.block?.truncated);
+    return layout;
+}
+
+/**
+ * 把卡片画进一个 canvas。
+ * @param {HTMLCanvasElement} canvas
+ * @param {number} pixelWidth 像素宽度（1080 为原尺寸；高度按布局自动算）
+ * @param {'templateId'} templateId
+ * @param {object} data 文案数据
+ * @param {{sizeKey:string,fontKey:string,colors:object}} appearance
+ * @param {{autoHeight?:boolean, maxHeight?:number, layout?:object}} options
+ */
+function renderCard(canvas, pixelWidth, templateId, data, appearance, options = {}) {
     const template = TEMPLATE_BY_ID[templateId] || TEMPLATES[0];
     const font = FONT_BY_KEY[appearance?.fontKey] || FONT_STYLES[0];
     const step = SIZE_STEPS.find(item => item.key === appearance?.sizeKey) || SIZE_STEPS[1];
     const theme = makeTheme(template, appearance?.colors);
 
-    const px = Math.max(1, Math.round(pixelSize));
-    if (canvas.width !== px || canvas.height !== px) {
-        canvas.width = px;
-        canvas.height = px;
+    const maxHeight = options.autoHeight
+        ? Math.max(CARD_H_MIN, Math.min(CARD_H_MAX, options.maxHeight ?? CARD_H_MAX))
+        : CARD_H_MIN;
+    const layout = options.layout || layoutCard(templateId, data, appearance, { maxHeight });
+
+    const pxW = Math.max(1, Math.round(pixelWidth));
+    const scale = pxW / CARD_W;
+    const pxH = Math.max(1, Math.round(layout.height * scale));
+    if (canvas.width !== pxW || canvas.height !== pxH) {
+        canvas.width = pxW;
+        canvas.height = pxH;
     }
 
-    lastRenderTruncated = false;
+    lastRenderTruncated = Boolean(layout.truncated);
 
     const ctx = canvas.getContext('2d');
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.clearRect(0, 0, px, px);
-    const scale = px / CARD;
+    ctx.clearRect(0, 0, pxW, pxH);
     ctx.save();
     ctx.scale(scale, scale);
     template.draw(ctx, {
         ...data,
         font: { stack: font.stack, key: font.key, scale: step.scale },
-    }, theme);
+    }, theme, layout);
     ctx.restore();
     return canvas;
 }
@@ -1625,7 +1772,11 @@ const UI_CSS = `
     padding: 2px 0 14px;
 }
 #sa-export-overlay .sa-adjust-preview canvas {
-    width: min(78vw, 300px); height: auto; display: block;
+    width: auto; height: auto;
+    max-width: min(78vw, 300px);
+    max-height: 52vh;
+    max-height: 52dvh;
+    display: block;
     border-radius: 8px;
     box-shadow: 0 4px 18px rgba(60, 40, 30, .16);
     background: #fff;
@@ -1646,7 +1797,9 @@ const UI_CSS = `
 }
 #sa-export-overlay .sa-zoom.is-on { display: flex; }
 #sa-export-overlay .sa-zoom canvas {
-    width: min(100%, 82vh); height: auto;
+    width: auto; height: auto;
+    max-width: 100%;
+    max-height: 100%;
     border-radius: 8px;
     box-shadow: 0 12px 44px rgba(0, 0, 0, .45);
 }
@@ -1740,7 +1893,11 @@ const UI_CSS = `
     padding: 4px 0 6px;
 }
 #sa-export-overlay .sa-preview-wrap canvas {
-    width: 100%; max-width: 400px; height: auto; display: block;
+    width: auto; height: auto;
+    max-width: min(100%, 400px);
+    max-height: 62vh;
+    max-height: 62dvh;
+    display: block;
     border-radius: 8px;
     box-shadow: 0 8px 28px rgba(60, 40, 30, .18);
     background: #fff;
@@ -1819,8 +1976,9 @@ const UI_CSS = `
     #sa-export-overlay .sa-tpl-desc { margin-top: 3px; font-size: 10.5px; }
     #sa-export-overlay .sa-adjust-preview { padding: 2px 0 18px; }
     #sa-export-overlay .sa-adjust-preview canvas {
-        width: clamp(220px, 26vw, 340px);
-        height: clamp(220px, 26vw, 340px);
+        max-width: clamp(220px, 26vw, 340px);
+        max-height: 60vh;
+        max-height: 60dvh;
     }
     #sa-export-overlay .sa-preview-wrap canvas { max-width: 560px; }
     #sa-export-overlay .sa-rows { gap: 14px; }
@@ -1879,6 +2037,7 @@ class ExportPanel {
         this.toastTimer = 0;
         this.renderToken = 0;
         this.busy = false;
+        this.layoutCache = null;
         this.build();
     }
 
@@ -1926,7 +2085,7 @@ class ExportPanel {
                                 <div class="sa-colors"></div>
                             </div>
                         </div>
-                        <div class="sa-hint">字形取决于当前系统已安装的字体；配色可分别调整纸色、墨色与强调色。</div>
+                        <div class="sa-hint">字形取决于当前系统已安装的字体；卡片会随正文自动长高，最高到手机一屏；配色可分别调整纸色、墨色与强调色。</div>
                         <div class="sa-note" hidden></div>
                     </section>
                     <section class="sa-step" data-step="preview">
@@ -2152,10 +2311,47 @@ class ExportPanel {
         }
     }
 
+    /**
+     * 同一份文案 + 同一套外观只排版一次：微调预览、放大、最终预览、保存共用，
+     * 既省掉重复断行，也保证保存出来的尺寸和预览完全一致。
+     */
+    layoutFor(data) {
+        const id = this.settings.templateId;
+        const appearance = this.appearanceFor(id);
+        const colors = appearance.colors;
+        const cache = this.layoutCache;
+        if (cache
+            && cache.data === data
+            && cache.templateId === id
+            && cache.sizeKey === appearance.sizeKey
+            && cache.fontKey === appearance.fontKey
+            && cache.paper === colors.paper
+            && cache.ink === colors.ink
+            && cache.accent === colors.accent) {
+            return cache.layout;
+        }
+        const layout = layoutCard(id, data, appearance, { maxHeight: CARD_H_MAX });
+        this.layoutCache = {
+            data,
+            templateId: id,
+            sizeKey: appearance.sizeKey,
+            fontKey: appearance.fontKey,
+            paper: colors.paper,
+            ink: colors.ink,
+            accent: colors.accent,
+            layout,
+        };
+        return layout;
+    }
+
     repaintAdjust() {
         if (!this.data) return;
         requestAnimationFrame(() => {
-            renderCard(this.$adjustPreview, 720, this.settings.templateId, this.data, this.appearanceFor(this.settings.templateId));
+            renderCard(
+                this.$adjustPreview, 720, this.settings.templateId, this.data,
+                this.appearanceFor(this.settings.templateId),
+                { autoHeight: true, layout: this.layoutFor(this.data) },
+            );
             this.updateTruncNote();
         });
     }
@@ -2167,7 +2363,7 @@ class ExportPanel {
     updateTruncNote() {
         const truncated = isLastRenderTruncated();
         const text = truncated
-            ? '正文过长：已缩到最小字号仍放不下，末尾文字被省略。可试试切换到「小」字号，或挑一段更短的文字。'
+            ? '正文过长：已到最大高度并缩到最小字号仍放不下，末尾文字被省略。可试试切换到「小」字号，或挑一段更短的文字。'
             : '';
         this.dialog.querySelectorAll('.sa-note').forEach(note => {
             note.textContent = text;
@@ -2180,7 +2376,11 @@ class ExportPanel {
         if (!this.data) return;
         this.$zoom.classList.add('is-on');
         requestAnimationFrame(() => {
-            renderCard(this.$zoomCanvas, 1320, this.settings.templateId, this.data, this.appearanceFor(this.settings.templateId));
+            renderCard(
+                this.$zoomCanvas, 1320, this.settings.templateId, this.data,
+                this.appearanceFor(this.settings.templateId),
+                { autoHeight: true, layout: this.layoutFor(this.data) },
+            );
         });
     }
 
@@ -2224,7 +2424,11 @@ class ExportPanel {
         // preview
         this.$title.textContent = '预览';
         const template = TEMPLATE_BY_ID[this.settings.templateId];
-        this.$sub.textContent = template ? `${template.name} · 2160×2160 PNG` : '';
+        const appearance = this.appearanceFor(this.settings.templateId);
+        const layout = this.layoutFor(this.data);
+        this.$sub.textContent = template
+            ? `${template.name} · ${CARD_W * EXPORT_PIXEL_RATIO}×${Math.round(layout.height * EXPORT_PIXEL_RATIO)} PNG`
+            : '';
         this.$foot.innerHTML = `
             <button type="button" class="sa-btn" data-act="back">返回调整</button>
             <button type="button" class="sa-btn is-primary" data-act="save">保存</button>
@@ -2232,7 +2436,10 @@ class ExportPanel {
         this.$foot.querySelector('[data-act="back"]').addEventListener('click', () => this.setStep('adjust'));
         this.$foot.querySelector('[data-act="save"]').addEventListener('click', (event) => this.handleSave(event.currentTarget));
 
-        renderCard(this.$previewCanvas, CARD, this.settings.templateId, this.data, this.appearanceFor(this.settings.templateId));
+        renderCard(this.$previewCanvas, CARD_W, this.settings.templateId, this.data, appearance, {
+            autoHeight: true,
+            layout,
+        });
         this.updateTruncNote();
     }
 
@@ -2244,6 +2451,7 @@ class ExportPanel {
     // ---- 打开 / 关闭 ----
     async open(data) {
         this.data = data;
+        this.layoutCache = null;
         this.settings = readExportSettings();
         if (this.settings.fontKey === 'kai') await ensureBundledKai();
         this.setStep('template');
@@ -2288,6 +2496,7 @@ class ExportPanel {
         this.$zoom?.classList.remove('is-on');
         this.hideToast();
         this.data = null;
+        this.layoutCache = null;
     }
 
     repin() {
@@ -2311,7 +2520,12 @@ class ExportPanel {
     // ---- 保存 ----
     async makeBlob(data) {
         const canvas = document.createElement('canvas');
-        renderCard(canvas, CARD * EXPORT_PIXEL_RATIO, this.settings.templateId, data, this.appearanceFor(this.settings.templateId));
+        const appearance = this.appearanceFor(this.settings.templateId);
+        const layout = this.layoutFor(data);
+        renderCard(canvas, CARD_W * EXPORT_PIXEL_RATIO, this.settings.templateId, data, appearance, {
+            autoHeight: true,
+            layout,
+        });
         return canvasToBlob(canvas);
     }
 
@@ -2321,7 +2535,10 @@ class ExportPanel {
         if (!data) return;
         this.busy = true;
         button.disabled = true;
+        button.textContent = '生成中…';
         try {
+            // 先让「生成中…」画出来，再开始 2160 宽的同步绘制，避免点击后像卡住
+            await new Promise(resolve => requestAnimationFrame(() => resolve()));
             const blob = await this.makeBlob(data);
             downloadBlob(blob, buildFileName(data));
             this.showToast('已保存为图片');
@@ -2331,6 +2548,7 @@ class ExportPanel {
         } finally {
             this.busy = false;
             button.disabled = false;
+            button.textContent = '保存';
         }
     }
 
@@ -2433,9 +2651,13 @@ if (document.readyState === 'loading') {
 // 调试 / 自测入口（也是 _dev 预览脚本的调用口）
 globalThis.STArchiveExport = Object.freeze({
     CARD,
+    CARD_W,
+    CARD_H_MIN,
+    CARD_H_MAX,
     TEMPLATES,
     FONT_STYLES,
     SIZE_STEPS,
+    layoutCard,
     renderCard,
     resolveCurrentQuote,
     buildCardData,
