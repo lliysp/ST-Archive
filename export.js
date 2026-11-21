@@ -1099,7 +1099,7 @@ function drawCollage(ctx, d, t, layout) {
     const height = layout.height;
 
     // 纸外的底：纯白，固定不跟配色走
-    ctx.fillStyle = '#FFFFFF';
+    ctx.fillStyle = '#f7f4ee';
     ctx.fillRect(0, 0, CARD_W, height);
 
     // 下面那张纸：小一圈 + 转 5°，靠边缘线交代它是另一张。
@@ -1245,14 +1245,17 @@ function drawCollageSheet(ctx, d, t, layout) {
 
 /**
  * 模板 5 · 明信片
- * 固定 1080×1080：外框 + 一排「520521」邮票格 + 左侧竖排标题框 + 中间虚线正文框，
- * 右侧头像 / 楼层 / To·From / 日期。正文放不下时缩字号，再不行末行省略。
+ * 固定 1080×660 横版：左上角一小块邮编格 + 左侧竖排标题 + 中间正文，
+ * 右侧头像 / 楼层 / To·From / 日期。标题与正文不加边框；
+ * 虚线只用于横线，虚线框只保留头像。
  */
+const POSTCARD_H = 660;
+
 function layoutPostcard(ctx, d) {
     const scale = d.font.scale;
     const block = fitTextBlock(ctx, d.text, {
-        width: 370,
-        maxHeight: 590,
+        width: 480,
+        maxHeight: 444,
         size: 34 * scale,
         lineHeight: 1.85,
         stack: d.font.stack,
@@ -1261,7 +1264,7 @@ function layoutPostcard(ctx, d) {
         minScale: 0.58,
     });
     return {
-        height: CARD_H_MIN,
+        height: POSTCARD_H,
         block,
         bodyH: block.lines.length * block.lh,
     };
@@ -1277,46 +1280,40 @@ function drawPostcard(ctx, d, t, layout) {
     // 外框：一条实线 + 一条细内线
     ctx.save();
     ctx.strokeStyle = rgba(t.accent, 0.55);
-    ctx.lineWidth = 3;
-    ctx.strokeRect(38, 38, CARD_W - 76, height - 76);
+    ctx.lineWidth = 2.4;
+    ctx.strokeRect(18, 18, CARD_W - 36, height - 36);
     ctx.strokeStyle = rgba(t.accent, 0.22);
-    ctx.lineWidth = 1.2;
-    ctx.strokeRect(50, 50, CARD_W - 100, height - 100);
+    ctx.lineWidth = 1.1;
+    ctx.strokeRect(27, 27, CARD_W - 54, height - 54);
     ctx.restore();
 
-    // 顶部一排六枚邮票格：数字是设计稿装饰
-    const digits = '520521';
-    const stampW = 118;
-    const stampH = 138;
-    const stampGap = 10;
-    for (let i = 0; i < digits.length; i++) {
-        const x = 70 + i * (stampW + stampGap);
-        const y = 70;
-        ctx.save();
-        ctx.fillStyle = rgba(t.accent, 0.05);
-        ctx.fillRect(x, y, stampW, stampH);
-        ctx.restore();
-        strokeDashRect(ctx, x, y, stampW, stampH, rgba(t.accent, 0.42), 1.6, [7, 5]);
-        text(ctx, digits[i], x + stampW / 2, y + stampH / 2 + 20, {
-            size: 58,
-            stack: MONO_STACK,
-            color: rgba(t.accent, 0.7),
-            align: 'center',
-        });
+    // 左上角邮编格：只占很小一块，实线框（虚线框只属于头像）
+    const zipX = 52;
+    const zipY = 48;
+    const zipW = 36;
+    const zipH = 34;
+    const zipGap = 6;
+    ctx.save();
+    ctx.strokeStyle = rgba(t.accent, 0.38);
+    ctx.lineWidth = 1.2;
+    for (let i = 0; i < 6; i++) {
+        const x = zipX + i * (zipW + zipGap);
+        ctx.fillStyle = rgba(t.accent, 0.04);
+        ctx.fillRect(x, zipY, zipW, zipH);
+        ctx.strokeRect(x, zipY, zipW, zipH);
     }
+    ctx.restore();
+    text(ctx, '邮政编码', zipX + 6 * (zipW + zipGap) + 4, zipY + zipH - 7, {
+        size: 12, stack: d.font.stack, color: rgba(t.ink, 0.36), tracking: 1.2,
+    });
 
-    // 左侧竖排标题框：文字从上往下读
-    const stripX = 64;
-    const stripY = 270;
-    const stripW = 150;
-    const stripH = 650;
-    strokeDashRect(ctx, stripX, stripY, stripW, stripH, rgba(t.accent, 0.38), 1.6, [7, 6]);
+    // 左侧竖排标题：不加边框，文字从上往下读
     const title = `${d.char} - ${d.chatName}`;
     const titleSize = fitSingleLine(ctx, title, {
-        size: 40 * scale, width: stripH - 60, stack: d.font.stack, weight: '600', tracking: 2, minSize: 18,
+        size: 34 * scale, width: 460, stack: d.font.stack, weight: '600', tracking: 2, minSize: 16,
     });
     ctx.save();
-    ctx.translate(stripX + stripW / 2 - titleSize * 0.4, stripY + 30);
+    ctx.translate(105 - titleSize * 0.4, 122);
     ctx.rotate(Math.PI / 2);
     text(ctx, title, 0, 0, {
         size: titleSize,
@@ -1327,74 +1324,69 @@ function drawPostcard(ctx, d, t, layout) {
     });
     ctx.restore();
 
-    // 中间正文框（虚线，文字左对齐）
-    const boxX = 238;
-    const boxY = 270;
-    const boxW = 430;
-    const boxH = 650;
-    strokeDashRect(ctx, boxX, boxY, boxW, boxH, rgba(t.accent, 0.45), 2, [9, 7]);
-    const bodyTop = boxY + 30 + Math.max(0, (590 - layout.bodyH) / 2);
-    drawTextBlock(ctx, layout.block, boxX + 32, bodyTop, {
+    // 中间正文：不加边框，左对齐
+    const bodyTop = 152 + Math.max(0, (444 - layout.bodyH) / 2);
+    drawTextBlock(ctx, layout.block, 190, bodyTop, {
         stack: d.font.stack,
         weight: '400',
         color: t.ink,
         tracking: 0.4,
     });
 
-    // 右栏：头像（竖长方形，虚线框）
-    const avatarX = 700;
-    const avatarY = 270;
-    const avatarW = 290;
-    const avatarH = 340;
+    // 右栏：头像（唯一保留的虚线框）
+    const avatarX = 860;
+    const avatarY = 48;
+    const avatarW = 190;
+    const avatarH = 250;
     if (!drawImageCover(ctx, d.avatar, avatarX, avatarY, avatarW, avatarH, 0)) {
         drawAvatarFallback(ctx, avatarX, avatarY, avatarW, avatarH, 0, d.char, t);
     }
-    strokeDashRect(ctx, avatarX, avatarY, avatarW, avatarH, rgba(t.accent, 0.42), 1.6, [6, 5]);
+    strokeDashRect(ctx, avatarX, avatarY, avatarW, avatarH, rgba(t.accent, 0.42), 1.4, [6, 5]);
 
     // 楼层
     if (d.mesid) {
-        text(ctx, `#${d.mesid}`, avatarX + avatarW / 2, 650, {
-            size: 24, stack: MONO_STACK, color: rgba(t.ink, 0.42), tracking: 0.5, align: 'center',
+        text(ctx, `#${d.mesid}`, avatarX + avatarW / 2, 328, {
+            size: 21, stack: MONO_STACK, color: rgba(t.ink, 0.42), tracking: 0.5, align: 'center',
         });
     }
-    dashedLine(ctx, 700, 690, 1000, 690, rgba(t.accent, 0.3), 1.4, [6, 6]);
 
-    // To / From：标签 + 值 + 虚线延长线
-    const drawField = (label, value, baseline) => {
-        text(ctx, label, 700, baseline, {
-            size: 27 * scale, stack: d.font.stack, weight: '600', color: rgba(t.accent, 0.86), tracking: 0.4,
+    // To / From：标签和冒号留在虚线外面，后面的值压在虚线上
+    const fieldRight = 1048;
+    const drawField = (label, value, lineY) => {
+        text(ctx, label, 720, lineY - 6, {
+            size: 26 * scale, stack: d.font.stack, weight: '600', color: rgba(t.accent, 0.86), tracking: 0.4,
         });
-        setFont(ctx, 27 * scale, d.font.stack, '600');
+        setFont(ctx, 26 * scale, d.font.stack, '600');
         const labelW = measureTracked(ctx, label, 0.4);
-        const valueX = 700 + labelW + 14;
+        const valueX = 724 + labelW + 10;
         const valueSize = fitSingleLine(ctx, value, {
-            size: 24 * scale, width: 1000 - valueX - 10, stack: MONO_STACK, weight: '400',
-            style: 'italic', tracking: 0.4, minSize: 14,
+            size: 21 * scale, width: fieldRight - valueX - 8, stack: MONO_STACK, weight: '400',
+            style: 'italic', tracking: 0.4, minSize: 13,
         });
-        text(ctx, value, valueX, baseline, {
+        text(ctx, value, valueX, lineY - 6, {
             size: valueSize, stack: MONO_STACK, weight: '400', style: 'italic',
             color: rgba(t.ink, 0.72), tracking: 0.4,
         });
-        setFont(ctx, valueSize, MONO_STACK, '400', 'italic');
-        const valueW = measureTracked(ctx, value, 0.4);
-        dashedLine(ctx, valueX + valueW + 8, baseline + 6, 1000, baseline + 6, rgba(t.accent, 0.32), 1.3, [5, 5]);
+        dashedLine(ctx, valueX, lineY, fieldRight, lineY, rgba(t.accent, 0.34), 1.3, [5, 5]);
     };
-    drawField('To:', d.user, 758);
-    dashedLine(ctx, 700, 812, 1000, 812, rgba(t.accent, 0.28), 1.3, [6, 6]);
-    drawField('From:', d.char, 874);
+    drawField('To:', d.user, 424);
+    drawField('From:', d.char, 524);
 
     // 日期
-    text(ctx, d.time, 1000, 936, {
-        size: 20, stack: MONO_STACK, color: rgba(t.ink, 0.4), tracking: 0.3, align: 'right',
+    text(ctx, d.time, fieldRight, 596, {
+        size: 18, stack: MONO_STACK, style: 'italic', color: rgba(t.ink, 0.42), tracking: 0.3, align: 'right',
     });
 }
 
 /**
  * 模板 6 · 日记
- * 错开叠放的两张纸 + 右上角标签；日期 / 右对齐标题 + 虚线；正文压在横格线上；
- * 右下角旋转便签（To 角色 / 装饰英文 / —— user）。左侧不打孔。
+ * 错开叠放的两张纸 + 夹在纸间的 #n 标签；首行只有居中标题，标题和正文下方都有横虚线，
+ * 正文走到哪画到哪，不留空线；右下角旋转便签（To 角色 / 装饰英文 / 日期 / —— user），
+ * 便签本身无边框。左侧不打孔。
  */
-const DIARY_RULE_TOP = 300;
+const DIARY_TITLE_BASELINE = 150;
+const DIARY_TITLE_RULE = 192;
+const DIARY_RULE_TOP = 254;
 const DIARY_RULE_GAP = 62;
 const DIARY_NOTE_RESERVE = 380;
 
@@ -1419,7 +1411,7 @@ function layoutDiary(ctx, d, maxHeight) {
         CARD_H_MIN,
         Math.min(maxHeight, DIARY_RULE_TOP + lines * DIARY_RULE_GAP + DIARY_NOTE_RESERVE),
     );
-    return { height, block, ruleCount: Math.max(8, lines) };
+    return { height, block, ruleCount: lines };
 }
 
 function drawDiary(ctx, d, t, layout) {
@@ -1440,7 +1432,23 @@ function drawDiary(ctx, d, t, layout) {
     ctx.strokeRect(70, 68, 968, height - 104);
     ctx.restore();
 
-    // 上面那张纸
+    // #n 标签：画在两张纸之间，右侧从上层纸下面露出来
+    if (d.mesid) {
+        ctx.save();
+        ctx.translate(990, 125);
+        ctx.rotate(0.38);
+        ctx.fillStyle = mixColor(t.paper, t.accent, 0.2);
+        ctx.fillRect(-78, -28, 156, 56);
+        ctx.strokeStyle = rgba(t.accent, 0.42);
+        ctx.lineWidth = 1.4;
+        ctx.strokeRect(-78, -28, 156, 56);
+        text(ctx, `#${d.mesid}`, 46, 7, {
+            size: 21, stack: MONO_STACK, color: rgba(t.accent, 0.85), tracking: 0.6, align: 'center',
+        });
+        ctx.restore();
+    }
+
+    // 上面那张纸：盖住标签左半边
     ctx.fillStyle = t.paper;
     ctx.fillRect(40, 40, 968, height - 96);
     ctx.save();
@@ -1449,64 +1457,24 @@ function drawDiary(ctx, d, t, layout) {
     ctx.strokeRect(40, 40, 968, height - 96);
     ctx.restore();
 
-    // 右上角斜贴的标签
-    ctx.save();
-    ctx.translate(930, 74);
-    ctx.rotate(0.38);
-    ctx.fillStyle = mixColor(t.paper, t.accent, 0.2);
-    ctx.fillRect(-78, -28, 156, 56);
-    ctx.strokeStyle = rgba(t.accent, 0.42);
-    ctx.lineWidth = 1.4;
-    ctx.strokeRect(-78, -28, 156, 56);
-    if (d.mesid) {
-        text(ctx, `#${d.mesid}`, 0, 7, {
-            size: 21, stack: MONO_STACK, color: rgba(t.accent, 0.85), tracking: 0.6, align: 'center',
-        });
-    }
-    ctx.restore();
-
-    // 日期 + 右对齐标题：中间用虚线连起来，标题下面再压一条虚线
-    const dateLabel = 'date:';
-    text(ctx, dateLabel, 120, 160, {
-        size: 26 * scale, stack: d.font.stack, weight: '500', color: rgba(t.ink, 0.58), tracking: 0.4,
-    });
-    setFont(ctx, 26 * scale, d.font.stack, '500');
-    const dateLabelW = measureTracked(ctx, dateLabel, 0.4);
-    const dateX = 120 + dateLabelW + 14;
-    text(ctx, d.time, dateX, 160, {
-        size: 23 * scale, stack: MONO_STACK, color: rgba(t.ink, 0.45), tracking: 0.4,
-    });
-    setFont(ctx, 23 * scale, MONO_STACK, '400');
-    const dateEnd = dateX + measureTracked(ctx, d.time, 0.4);
-
+    // 首行只有标题，居中
     const title = `${d.char} · ${d.chatName}`;
     const titleSize = fitSingleLine(ctx, title, {
-        size: 46 * scale, width: 560, stack: d.font.stack, weight: '600', tracking: 2, minSize: 20,
+        size: 46 * scale, width: 760, stack: d.font.stack, weight: '600', tracking: 2, minSize: 20,
     });
-    text(ctx, title, 960, 160, {
+    text(ctx, title, CARD_W / 2, DIARY_TITLE_BASELINE, {
         size: titleSize,
         stack: d.font.stack,
         weight: '600',
         color: mixColor(t.ink, t.accent, 0.3),
         tracking: 2,
-        align: 'right',
+        align: 'center',
     });
-    setFont(ctx, titleSize, d.font.stack, '600');
-    const titleWidth = measureTracked(ctx, title, 2);
-    const titleStart = 960 - titleWidth;
-    if (titleStart - dateEnd > 48) {
-        dashedLine(ctx, dateEnd + 22, 152, titleStart - 22, 152, rgba(t.accent, 0.3), 1.3, [5, 6]);
-    }
-    dashedLine(ctx, titleStart, 190, 960, 190, rgba(t.accent, 0.42), 1.6, [6, 6]);
+    dashedLine(ctx, 118, DIARY_TITLE_RULE, 960, DIARY_TITLE_RULE, rgba(t.accent, 0.42), 1.6, [6, 6]);
 
-    // 横格线：一直铺到纸的底部，便签压在上面
+    // 正文：一行一格，每行下面都压一条虚线；没有正文的地方不画空线
     const ruleTop = DIARY_RULE_TOP;
     const ruleGap = DIARY_RULE_GAP;
-    for (let y = ruleTop; y <= height - 70; y += ruleGap) {
-        dashedLine(ctx, 118, y, 960, y, rgba(t.accent, 0.24), 1.3, [5, 7]);
-    }
-
-    // 正文：一行一格，压在横线上
     block.lines.forEach((line, index) => {
         const ruleY = ruleTop + index * ruleGap;
         text(ctx, line, 138, ruleY - 18, {
@@ -1516,20 +1484,32 @@ function drawDiary(ctx, d, t, layout) {
             color: t.ink,
             tracking: 0.4,
         });
+        dashedLine(ctx, 118, ruleY, 960, ruleY, rgba(t.accent, 0.24), 1.3, [5, 7]);
     });
 
-    // 右下角旋转便签
+    // 便签左侧的窄空位：正文排不进来，补一点小装饰
+    const decorY = height - 262;
+    text(ctx, '(｡･ω･｡)', 150, decorY, {
+        size: 30 * scale,
+        stack: d.font.stack,
+        color: rgba(t.accent, 0.36),
+        tracking: 1,
+    });
+    text(ctx, 'a quiet little page', 150, decorY + 38, {
+        size: 20,
+        stack: SERIF_EN,
+        style: 'italic',
+        color: rgba(t.ink, 0.34),
+        tracking: 0.8,
+    });
+
+    // 右下角旋转便签：无边框
     ctx.save();
     ctx.translate(800, height - 214);
     ctx.rotate(-0.13);
 
-    ctx.save();
     ctx.fillStyle = mixColor(t.paper, t.accent, 0.08);
     ctx.fillRect(-210, -150, 420, 300);
-    ctx.strokeStyle = rgba(t.accent, 0.35);
-    ctx.lineWidth = 1.4;
-    ctx.strokeRect(-210, -150, 420, 300);
-    ctx.restore();
 
     text(ctx, `To ${d.char}:`, -188, -104, {
         size: 30 * scale,
@@ -1539,12 +1519,10 @@ function drawDiary(ctx, d, t, layout) {
         tracking: 0.5,
     });
 
-    strokeDashRect(ctx, -188, -76, 376, 196, rgba(t.accent, 0.4), 1.4, [5, 5]);
-
     const decor = fitTextBlock(ctx, DECOR_TEXT.polaroid, {
         width: 344,
-        maxHeight: 168,
-        size: 19,
+        maxHeight: 110,
+        size: 18,
         lineHeight: 1.5,
         stack: SERIF_EN,
         weight: '400',
@@ -1553,7 +1531,7 @@ function drawDiary(ctx, d, t, layout) {
         minScale: 0.8,
     });
     const decorH = decor.lines.length * decor.lh;
-    drawTextBlock(ctx, decor, 0, -62 + Math.max(0, (168 - decorH) / 2), {
+    drawTextBlock(ctx, decor, 0, -66 + Math.max(0, (110 - decorH) / 2), {
         stack: SERIF_EN,
         weight: '400',
         style: 'italic',
@@ -1562,7 +1540,17 @@ function drawDiary(ctx, d, t, layout) {
         align: 'center',
     });
 
-    text(ctx, `—— ${d.user}`, 188, 138, {
+    // 日期挪到便签上，单独一行
+    text(ctx, d.time, 0, 74, {
+        size: 19,
+        stack: MONO_STACK,
+        style: 'italic',
+        color: rgba(t.ink, 0.5),
+        tracking: 0.4,
+        align: 'center',
+    });
+
+    text(ctx, `—— ${d.user}`, 188, 132, {
         size: 26 * scale,
         stack: d.font.stack,
         color: rgba(t.accent, 0.9),
@@ -1608,7 +1596,7 @@ const TEMPLATES = [
     {
         id: 'postcard',
         name: '明信片',
-        desc: '固定方形 · 邮票格',
+        desc: '固定横版 · 邮编格',
         defaults: { paper: '#FDFBF7', ink: '#3B322D', accent: '#A45050' },
         layout: layoutPostcard,
         draw: drawPostcard,
