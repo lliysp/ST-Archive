@@ -4,7 +4,7 @@
  *
  * 独立模块，不参与原有拾遗 / 档案馆逻辑：
  *   1. 书签详情弹窗右上角注入「导出」按钮
- *   2. 六套卡片模板（档案馆 / 拍立得 / 信纸 / 小报 / 明信片 / 日记）
+ *   2. 八套卡片模板（档案馆 / 拍立得 / 信纸 / 小报 / 明信片 / 日记 / 朋友圈 / 晋江评论）
  *   3. 微调：字号三档、字体四款、三块配色、占位文案
  *   4. 预览 → 保存为图片
  *
@@ -25,10 +25,13 @@ const EXPORT_PIXEL_RATIO = 2; // 导出倍率：1080 → 2160，最高 2160×384
 const TOAST_MS = 2200;
 
 // 设计稿里固定出现的装饰文案：这里的文字作为默认值，用户可在「微调 · 文案」里改写
+const DECOR_COMMENT = '满堂花醉三千客，一剑霜寒十四州';
 const DECOR_TEXT = {
     polaroid: 'just a flicker of light in the vast dark',
     collage: 'I have been collecting words like others collect coins, each one a small treasure pressed between the pages of my memory.',
     diaryMargin: 'a quiet little page',
+    momentsComment: DECOR_COMMENT,
+    jinjiangComment: DECOR_COMMENT,
 };
 
 // 拍立得互动栏：设计稿上的装饰数字，不接真实数据
@@ -45,6 +48,12 @@ const TEMPLATE_TEXT_FIELDS = {
     diary: [
         { key: 'diaryNote', label: '便签英文', def: DECOR_TEXT.polaroid, multiline: true },
         { key: 'diaryMargin', label: '旁注', def: DECOR_TEXT.diaryMargin },
+    ],
+    moments: [
+        { key: 'momentsComment', label: '评论', def: DECOR_TEXT.momentsComment },
+    ],
+    jinjiang: [
+        { key: 'jinjiangComment', label: '评论', def: DECOR_TEXT.jinjiangComment },
     ],
 };
 
@@ -752,8 +761,87 @@ function drawAvatarFallback(ctx, x, y, w, h, radius, char, t) {
     ctx.restore();
 }
 
+/** 导航栏返回箭头（‹） */
+function drawNavBack(ctx, x, y, size, color, lineWidth) {
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = lineWidth;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    ctx.moveTo(x + size * 0.32, y - size * 0.5);
+    ctx.lineTo(x - size * 0.18, y);
+    ctx.lineTo(x + size * 0.32, y + size * 0.5);
+    ctx.stroke();
+    ctx.restore();
+}
+
+/** 右上角「···」 */
+function drawMoreDots(ctx, cx, cy, radius, gap, color) {
+    ctx.save();
+    ctx.fillStyle = color;
+    [-1, 0, 1].forEach(offset => {
+        ctx.beginPath();
+        ctx.arc(cx + offset * gap, cy, radius, 0, Math.PI * 2);
+        ctx.fill();
+    });
+    ctx.restore();
+}
+
+/** 空心爱心（朋友圈点赞图标） */
+function drawHeartOutline(ctx, cx, cy, size, color, lineWidth) {
+    const s = size / 2;
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = lineWidth;
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    ctx.moveTo(0, s * 0.86);
+    ctx.bezierCurveTo(-s * 1.65, -s * 0.32, -s * 0.62, -s * 1.34, 0, -s * 0.44);
+    ctx.bezierCurveTo(s * 0.62, -s * 1.34, s * 1.65, -s * 0.32, 0, s * 0.86);
+    ctx.closePath();
+    ctx.stroke();
+    ctx.restore();
+}
+
+/** 空心对话气泡（评论图标） */
+function drawSpeechOutline(ctx, cx, cy, w, color, lineWidth) {
+    const h = w * 0.8;
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = lineWidth;
+    ctx.lineJoin = 'round';
+    roundRectPath(ctx, cx - w / 2, cy - h / 2, w, h, w * 0.24);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(cx - w * 0.16, cy + h / 2 - 1);
+    ctx.lineTo(cx - w * 0.24, cy + h / 2 + w * 0.18);
+    ctx.lineTo(cx - w * 0.02, cy + h / 2 - 1);
+    ctx.stroke();
+    ctx.restore();
+}
+
+/** 用户头像：有人设图片就裁成圆角矩形，没有就退回首字兜底头像 */
+function drawUserAvatar(ctx, image, x, y, size, radius, name, t) {
+    if (drawImageCover(ctx, image, x, y, size, size, radius)) return;
+    drawAvatarFallback(ctx, x, y, size, size, radius, name, t);
+}
+
+/** 晋江顶部的四宫格图标 */
+function drawGridIcon(ctx, x, y, size, color) {
+    const gap = size * 0.16;
+    const cell = (size - gap) / 2;
+    ctx.save();
+    ctx.fillStyle = color;
+    [[0, 0], [1, 0], [0, 1], [1, 1]].forEach(([col, row]) => {
+        ctx.fillRect(x + col * (cell + gap), y + row * (cell + gap), cell, cell);
+    });
+    ctx.restore();
+}
+
 // ============================================================
-// 四、六套模板
+// 四、八套模板
 // ============================================================
 
 /**
@@ -1608,6 +1696,386 @@ function drawDiary(ctx, d, t, layout) {
     ctx.restore();
 }
 
+/**
+ * 模板 7 · 朋友圈
+ * 手机动态详情页：灰色导航栏 + 方形头像 + 正文 + 点赞 / 评论。
+ */
+const MOMENTS_HEAD_H = 120;
+const MOMENTS_PAD = 48;
+const MOMENTS_AVATAR = 156;
+const MOMENTS_AVATAR_Y = MOMENTS_HEAD_H + 48;
+const MOMENTS_CONTENT_X = MOMENTS_PAD + MOMENTS_AVATAR + 30;
+const MOMENTS_CONTENT_W = CARD_W - MOMENTS_CONTENT_X - MOMENTS_PAD;
+const MOMENTS_BODY_TOP = MOMENTS_HEAD_H + 168;
+const MOMENTS_COMMENT_X = MOMENTS_PAD + 56 + 52 + 16;
+const MOMENTS_COMMENT_W = CARD_W - MOMENTS_COMMENT_X - MOMENTS_PAD;
+
+function layoutMoments(ctx, d, maxHeight) {
+    const scale = d.font.scale;
+    const commentBlock = fitTextBlock(ctx, d.decor?.momentsComment || DECOR_TEXT.momentsComment, {
+        width: MOMENTS_COMMENT_W - 32,
+        maxHeight: 120,
+        size: 27 * scale,
+        lineHeight: 1.5,
+        stack: d.font.stack,
+        weight: '400',
+        tracking: 0.3,
+        minScale: 0.85,
+    });
+    const commentH = Math.max(38, commentBlock.lines.length * commentBlock.lh);
+    const footerH = 178 + commentH;
+    const bodyMax = Math.max(120, maxHeight - MOMENTS_BODY_TOP - 96 - footerH);
+    const block = fitTextBlockAuto(ctx, d.text, {
+        width: MOMENTS_CONTENT_W,
+        maxHeight: bodyMax,
+        size: 38 * scale,
+        lineHeight: 1.75,
+        stack: d.font.stack,
+        weight: '400',
+        tracking: 0.4,
+    });
+    const bodyH = block.lines.length * block.lh;
+    const height = Math.max(
+        CARD_H_MIN,
+        Math.min(maxHeight, MOMENTS_BODY_TOP + bodyH + 96 + footerH),
+    );
+    return { height, block, bodyH, commentBlock, commentH, footerH };
+}
+
+function drawMoments(ctx, d, t, layout) {
+    const height = layout.height;
+    const scale = d.font.scale;
+
+    ctx.fillStyle = t.paper;
+    ctx.fillRect(0, 0, CARD_W, height);
+
+    // 顶部导航栏
+    ctx.fillStyle = mixColor(t.paper, t.ink, 0.07);
+    ctx.fillRect(0, 0, CARD_W, MOMENTS_HEAD_H);
+    ctx.save();
+    ctx.strokeStyle = rgba(t.ink, 0.08);
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, MOMENTS_HEAD_H - 0.5);
+    ctx.lineTo(CARD_W, MOMENTS_HEAD_H - 0.5);
+    ctx.stroke();
+    ctx.restore();
+
+    drawNavBack(ctx, 58, MOMENTS_HEAD_H / 2, 26, rgba(t.ink, 0.78), 3);
+    text(ctx, '详情', CARD_W / 2, MOMENTS_HEAD_H / 2 + 12, {
+        size: 34 * Math.min(1, scale + 0.04),
+        stack: d.font.stack,
+        weight: '500',
+        color: t.ink,
+        tracking: 1.5,
+        align: 'center',
+    });
+    drawMoreDots(ctx, 1010, MOMENTS_HEAD_H / 2, 4.5, 16, rgba(t.ink, 0.72));
+
+    // 角色头像
+    const avatarX = MOMENTS_PAD;
+    const avatarY = MOMENTS_AVATAR_Y;
+    if (!drawImageCover(ctx, d.avatar, avatarX, avatarY, MOMENTS_AVATAR, MOMENTS_AVATAR, 6)) {
+        drawAvatarFallback(ctx, avatarX, avatarY, MOMENTS_AVATAR, MOMENTS_AVATAR, 6, d.char, t);
+    }
+    ctx.save();
+    roundRectPath(ctx, avatarX, avatarY, MOMENTS_AVATAR, MOMENTS_AVATAR, 6);
+    ctx.strokeStyle = rgba(t.ink, 0.10);
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+    ctx.restore();
+
+    // 角色名
+    text(ctx, d.char, MOMENTS_CONTENT_X, avatarY + 46, {
+        size: 42 * scale,
+        stack: d.font.stack,
+        weight: '500',
+        color: t.accent,
+        tracking: 0.8,
+    });
+
+    // 正文
+    drawTextBlock(ctx, layout.block, MOMENTS_CONTENT_X, MOMENTS_BODY_TOP, {
+        stack: d.font.stack,
+        weight: '400',
+        color: t.ink,
+        tracking: 0.4,
+    });
+
+    // 时间 / 楼层 / 更多
+    const stamp = [d.time, d.mesid ? `#${d.mesid}` : ''].filter(Boolean).join('  ');
+    const stampBaseline = MOMENTS_BODY_TOP + layout.bodyH + 58;
+    text(ctx, stamp, MOMENTS_CONTENT_X, stampBaseline, {
+        size: 24 * scale,
+        stack: MONO_STACK,
+        color: rgba(t.ink, 0.38),
+        tracking: 0.4,
+    });
+    text(ctx, '···', CARD_W - MOMENTS_PAD, stampBaseline, {
+        size: 26,
+        stack: MONO_STACK,
+        color: rgba(t.ink, 0.28),
+        tracking: 1,
+        align: 'right',
+    });
+
+    // 点赞 / 评论区（固定在卡片底部，短文本时留出和截图一样的空白）
+    const sectionTop = height - layout.footerH;
+    ctx.fillStyle = mixColor(t.paper, t.ink, 0.05);
+    ctx.fillRect(0, sectionTop, CARD_W, layout.footerH);
+
+    const likeCenter = sectionTop + 52;
+    drawHeartOutline(ctx, MOMENTS_PAD + 22, likeCenter - 2, 40, t.accent, 2.2);
+    drawUserAvatar(ctx, d.userAvatar, MOMENTS_PAD + 56, likeCenter - 26, 52, 6, d.user, t);
+
+    const commentTop = sectionTop + 96;
+    drawSpeechOutline(ctx, MOMENTS_PAD + 22, commentTop + 26, 38, t.accent, 2.2);
+    drawUserAvatar(ctx, d.userAvatar, MOMENTS_PAD + 56, commentTop, 52, 6, d.user, t);
+    text(ctx, d.user, MOMENTS_PAD + 56 + 52 + 16, commentTop + 34, {
+        size: 28 * scale,
+        stack: d.font.stack,
+        weight: '500',
+        color: t.accent,
+        tracking: 0.4,
+    });
+
+    // 虚线框只是示意，不画边框，也不改背景色；评论直接写在浅灰区域上
+    drawTextBlock(ctx, layout.commentBlock, MOMENTS_COMMENT_X, commentTop + 62, {
+        stack: d.font.stack,
+        weight: '400',
+        color: t.ink,
+        tracking: 0.3,
+    });
+}
+
+/**
+ * 模板 8 · 晋江评论
+ * 绿色书评界面：标题栏 + 分类胶囊 + 圆形头像 + 正文 + 评论。
+ */
+const JJ_HEAD_H = 148;
+const JJ_NAV_H = 96;
+const JJ_PAD = 48;
+const JJ_AVATAR = 84;
+const JJ_CONTENT_TOP = JJ_HEAD_H + JJ_NAV_H;
+const JJ_AVATAR_Y = JJ_CONTENT_TOP + 24;
+const JJ_PANEL_TOP = JJ_CONTENT_TOP + 136;
+const JJ_PANEL_W = CARD_W - JJ_PAD * 2;
+const JJ_BODY_PAD = 36;
+const JJ_BODY_W = JJ_PANEL_W - JJ_BODY_PAD * 2;
+const JJ_ACTION_H = 100;
+const JJ_COMMENT_W = CARD_W - JJ_PAD - 160;
+const JJ_COMMENT_TEXT_W = JJ_COMMENT_W - 40;
+
+function layoutJinjiang(ctx, d, maxHeight) {
+    const scale = d.font.scale;
+    const commentBlock = fitTextBlock(ctx, d.decor?.jinjiangComment || DECOR_TEXT.jinjiangComment, {
+        width: JJ_COMMENT_TEXT_W,
+        maxHeight: 120,
+        size: 28 * scale,
+        lineHeight: 1.5,
+        stack: d.font.stack,
+        weight: '400',
+        tracking: 0.3,
+        minScale: 0.85,
+    });
+    const commentH = Math.max(42, commentBlock.lines.length * commentBlock.lh);
+    const commentBoxH = Math.max(96, commentH + 48);
+    const footerH = 112 + commentBoxH;
+    const bodyMax = Math.max(
+        160,
+        maxHeight - JJ_PANEL_TOP - JJ_BODY_PAD * 2 - JJ_ACTION_H - footerH,
+    );
+    const block = fitTextBlockAuto(ctx, d.text, {
+        width: JJ_BODY_W,
+        maxHeight: bodyMax,
+        size: 36 * scale,
+        lineHeight: 1.8,
+        stack: d.font.stack,
+        weight: '400',
+        tracking: 0.4,
+    });
+    const bodyH = block.lines.length * block.lh;
+    const minPanelH = Math.max(0, CARD_H_MIN - JJ_PANEL_TOP - JJ_ACTION_H - footerH);
+    const panelH = Math.max(bodyH + JJ_BODY_PAD * 2, minPanelH);
+    const height = Math.max(
+        CARD_H_MIN,
+        Math.min(maxHeight, JJ_PANEL_TOP + panelH + JJ_ACTION_H + footerH),
+    );
+    return { height, block, bodyH, panelH, commentBlock, commentH, commentBoxH, footerH };
+}
+
+function drawJinjiang(ctx, d, t, layout) {
+    const height = layout.height;
+    const scale = d.font.scale;
+
+    ctx.fillStyle = t.paper;
+    ctx.fillRect(0, 0, CARD_W, height);
+
+    // 顶部绿色标题栏
+    ctx.fillStyle = t.accent;
+    ctx.fillRect(0, 0, CARD_W, JJ_HEAD_H);
+    drawNavBack(ctx, 58, JJ_HEAD_H / 2, 30, '#ffffff', 3.4);
+
+    const title = d.chatName || d.char || '标题';
+    const titleSize = fitSingleLine(ctx, title, {
+        size: 48 * Math.min(1, scale + 0.06),
+        width: 660,
+        stack: d.font.stack,
+        weight: '600',
+        tracking: 2,
+        minSize: 26,
+    });
+    text(ctx, title, CARD_W / 2, JJ_HEAD_H / 2 + titleSize * 0.36, {
+        size: titleSize,
+        stack: d.font.stack,
+        weight: '600',
+        color: '#ffffff',
+        tracking: 2,
+        align: 'center',
+    });
+
+    if (d.mesid) {
+        text(ctx, `#${d.mesid}`, 944, JJ_HEAD_H / 2 + 10, {
+            size: 26 * scale,
+            stack: MONO_STACK,
+            color: 'rgba(255,255,255,0.88)',
+            tracking: 0.5,
+            align: 'right',
+        });
+    }
+    ctx.save();
+    ctx.fillStyle = 'rgba(255,255,255,0.92)';
+    ctx.beginPath();
+    ctx.moveTo(968, JJ_HEAD_H / 2 - 11);
+    ctx.lineTo(1014, JJ_HEAD_H / 2 - 11);
+    ctx.lineTo(991, JJ_HEAD_H / 2 + 18);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+
+    // 分类胶囊
+    ctx.fillStyle = t.paper;
+    ctx.fillRect(0, JJ_HEAD_H, CARD_W, JJ_NAV_H);
+    ctx.save();
+    ctx.strokeStyle = rgba(t.ink, 0.08);
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, JJ_CONTENT_TOP - 0.5);
+    ctx.lineTo(CARD_W, JJ_CONTENT_TOP - 0.5);
+    ctx.stroke();
+    ctx.restore();
+
+    const pills = ['章评', '段评', '话题', '长评', '加精'];
+    const pillW = 140;
+    const pillH = 54;
+    const pillGap = 20;
+    const pillX = 28;
+    const pillY = JJ_HEAD_H + (JJ_NAV_H - pillH) / 2;
+    const pillFill = mixColor(t.accent, '#ffffff', 0.30);
+    pills.forEach((label, index) => {
+        const x = pillX + index * (pillW + pillGap);
+        ctx.save();
+        roundRectPath(ctx, x, pillY, pillW, pillH, pillH / 2);
+        ctx.fillStyle = pillFill;
+        ctx.fill();
+        ctx.restore();
+        text(ctx, label, x + pillW / 2, pillY + pillH / 2 + 9, {
+            size: 26 * scale,
+            stack: d.font.stack,
+            weight: '500',
+            color: '#ffffff',
+            tracking: 1.5,
+            align: 'center',
+        });
+    });
+    drawGridIcon(ctx, 948, JJ_HEAD_H + (JJ_NAV_H - 46) / 2, 46, t.accent);
+
+    // 圆形头像 + 角色名 + 时间
+    const avatarX = JJ_PAD;
+    const avatarY = JJ_AVATAR_Y;
+    if (!drawImageCover(ctx, d.avatar, avatarX, avatarY, JJ_AVATAR, JJ_AVATAR, JJ_AVATAR / 2)) {
+        drawAvatarFallback(ctx, avatarX, avatarY, JJ_AVATAR, JJ_AVATAR, JJ_AVATAR / 2, d.char, t);
+    }
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(avatarX + JJ_AVATAR / 2, avatarY + JJ_AVATAR / 2, JJ_AVATAR / 2, 0, Math.PI * 2);
+    ctx.strokeStyle = rgba(t.accent, 0.45);
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.restore();
+
+    text(ctx, d.char, avatarX + JJ_AVATAR + 28, avatarY + JJ_AVATAR / 2 + 11, {
+        size: 30 * scale,
+        stack: d.font.stack,
+        weight: '600',
+        color: rgba(t.ink, 0.55),
+        tracking: 0.7,
+    });
+    text(ctx, d.time, CARD_W - JJ_PAD, avatarY + JJ_AVATAR / 2 + 8, {
+        size: 22 * scale,
+        stack: MONO_STACK,
+        color: rgba(t.ink, 0.35),
+        tracking: 0.3,
+        align: 'right',
+    });
+
+    // 正文虚线框只是示意，不画边框 / 底色；正文直接排在白底上
+    const panelX = JJ_PAD;
+    const panelY = JJ_PANEL_TOP;
+    const panelH = layout.panelH;
+
+    const bodyTop = panelY + Math.max(JJ_BODY_PAD, (panelH - layout.bodyH) / 2);
+    // 短句像截图一样居中，长评仍左对齐，避免整段文字居中后难读
+    const centerBody = layout.block.lines.length <= 2;
+    drawTextBlock(ctx, layout.block, centerBody ? CARD_W / 2 : panelX + JJ_BODY_PAD, bodyTop, {
+        stack: d.font.stack,
+        weight: '400',
+        color: t.ink,
+        tracking: 0.4,
+        align: centerBody ? 'center' : 'left',
+    });
+
+    // 正文下方的爱心 / 更多
+    const actionY = panelY + panelH + JJ_ACTION_H / 2;
+    drawHeart(ctx, CARD_W - 150, actionY, 66, t.accent);
+    drawMoreDots(ctx, CARD_W - 68, actionY, 5, 17, rgba(t.ink, 0.55));
+
+    // 评论区
+    const sectionTop = height - layout.footerH;
+    ctx.fillStyle = mixColor(t.paper, t.ink, 0.045);
+    ctx.fillRect(0, sectionTop, CARD_W, layout.footerH);
+    ctx.save();
+    ctx.strokeStyle = rgba(t.ink, 0.07);
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, sectionTop + 0.5);
+    ctx.lineTo(CARD_W, sectionTop + 0.5);
+    ctx.stroke();
+    ctx.restore();
+
+    text(ctx, d.user, JJ_PAD, sectionTop + 54, {
+        size: 30 * scale,
+        stack: d.font.stack,
+        weight: '500',
+        color: rgba(t.ink, 0.50),
+        tracking: 0.5,
+    });
+
+    const boxY = sectionTop + 76;
+    const boxH = layout.commentBoxH;
+    // 评论虚线框只是示意，不画边框 / 底色；文字直接写在浅灰区域上
+    drawTextBlock(ctx, layout.commentBlock, JJ_PAD, boxY + 24, {
+        stack: d.font.stack,
+        weight: '400',
+        color: t.ink,
+        tracking: 0.3,
+    });
+
+    const commentCenter = boxY + boxH / 2;
+    drawHeart(ctx, 984, commentCenter, 52, t.accent);
+    drawMoreDots(ctx, 1040, commentCenter, 4.5, 16, rgba(t.ink, 0.5));
+}
+
 const TEMPLATES = [
     {
         id: 'archive',
@@ -1656,6 +2124,22 @@ const TEMPLATES = [
         defaults: { paper: '#FCFAF4', ink: '#3B322D', accent: '#A45050' },
         layout: layoutDiary,
         draw: drawDiary,
+    },
+    {
+        id: 'moments',
+        name: '朋友圈',
+        desc: '动态详情 · 点赞评论',
+        defaults: { paper: '#FFFFFF', ink: '#1B1B1B', accent: '#576B95' },
+        layout: layoutMoments,
+        draw: drawMoments,
+    },
+    {
+        id: 'jinjiang',
+        name: '晋江评论',
+        desc: '书评界面 · 章评标签',
+        defaults: { paper: '#FFFFFF', ink: '#3A3A3A', accent: '#5BA58F' },
+        layout: layoutJinjiang,
+        draw: drawJinjiang,
     },
 ];
 
@@ -1857,37 +2341,55 @@ function readQuotesSafe() {
     }
 }
 
-/** 从 scope（char:xxx.png / group:12）解析头像 URL */
+function toThumbUrl(ctx, type, file) {
+    if (!file) return '';
+    try {
+        const url = ctx?.getThumbnailUrl?.(type, file);
+        if (typeof url === 'string' && url) return url;
+    } catch (error) {
+        /* 忽略：走兜底路径 */
+    }
+    return `/thumbnail?type=${type}&file=${encodeURIComponent(file)}`;
+}
+
+/** 从 scope（char:xxx.png / group:12）解析角色头像 URL */
 function resolveAvatarUrl(quote, ctx) {
     const scope = String(quote.scope || '').trim()
         || String(quote.chatKey || '').split('::')[0]
         || '';
 
-    const toThumb = (file) => {
-        if (!file) return '';
-        try {
-            const url = ctx?.getThumbnailUrl?.('avatar', file);
-            if (typeof url === 'string' && url) return url;
-        } catch (error) {
-            /* 忽略：走兜底路径 */
-        }
-        return `/thumbnail?type=avatar&file=${encodeURIComponent(file)}`;
-    };
-
-    if (scope.startsWith('char:')) return toThumb(scope.slice(5));
+    if (scope.startsWith('char:')) return toThumbUrl(ctx, 'avatar', scope.slice(5));
 
     if (scope.startsWith('group:')) {
         const groupId = scope.slice(6);
         const group = ctx?.groups?.find?.(item => String(item?.id) === groupId);
         const file = group?.avatar_url || group?.avatar;
-        if (file) return toThumb(file);
+        if (file) return toThumbUrl(ctx, 'avatar', file);
         return '';
     }
 
     // 旧数据没有 scope：退化成「当前角色」
     const current = ctx?.characters?.[ctx?.characterId];
-    if (current?.avatar) return toThumb(current.avatar);
+    if (current?.avatar) return toThumbUrl(ctx, 'avatar', current.avatar);
     return '';
+}
+
+/**
+ * 当前用户（persona）头像 URL：优先用人设面板里选中的 persona，
+ * 其次是本聊天锁定的 persona，最后退到默认 persona。
+ * 都没有时返回空字符串，由调用方画首字兜底头像。
+ */
+function resolveUserAvatarUrl(ctx) {
+    const domSelected = document
+        .querySelector('#user_avatar_block .avatar-container.selected')
+        ?.getAttribute('data-avatar-id') || '';
+    const file = String(
+        domSelected
+        || ctx?.chatMetadata?.persona
+        || ctx?.powerUserSettings?.default_persona
+        || '',
+    ).trim();
+    return toThumbUrl(ctx, 'persona', file);
 }
 
 function loadImage(url) {
@@ -1907,8 +2409,10 @@ function loadImage(url) {
 async function buildCardData(quote) {
     const ctx = getShContext();
     const user = String(ctx?.name1 || ctx?.name || '').trim() || 'user';
-    const avatarUrl = resolveAvatarUrl(quote, ctx);
-    const avatar = await loadImage(avatarUrl);
+    const [avatar, userAvatar] = await Promise.all([
+        loadImage(resolveAvatarUrl(quote, ctx)),
+        loadImage(resolveUserAvatarUrl(ctx)),
+    ]);
 
     return {
         char: quote.char,
@@ -1918,6 +2422,7 @@ async function buildCardData(quote) {
         mesid: quote.mesid,
         user,
         avatar,
+        userAvatar,
     };
 }
 
