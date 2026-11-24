@@ -5,7 +5,7 @@
  * 独立模块，不参与原有拾遗 / 档案馆逻辑：
  *   1. 书签详情弹窗右上角注入「导出」按钮
  *   2. 六套卡片模板（档案馆 / 拍立得 / 信纸 / 小报 / 明信片 / 日记）
- *   3. 微调：字号三档、字体四款、三块配色
+ *   3. 微调：字号三档、字体四款、三块配色、占位文案
  *   4. 预览 → 保存为图片
  *
  * 加载方式：由 index.js 末尾 `import('./export.js')` 引入，
@@ -24,14 +24,45 @@ const EXPORT_SETTINGS_KEY = 'st_archive_export'; // 导出偏好（模板/字号
 const EXPORT_PIXEL_RATIO = 2; // 导出倍率：1080 → 2160，最高 2160×3840
 const TOAST_MS = 2200;
 
-// 设计稿里固定出现的装饰文案（不属于真实数据，按图照抄）
+// 设计稿里固定出现的装饰文案：这里的文字作为默认值，用户可在「微调 · 文案」里改写
 const DECOR_TEXT = {
     polaroid: 'just a flicker of light in the vast dark',
     collage: 'I have been collecting words like others collect coins, each one a small treasure pressed between the pages of my memory.',
+    diaryMargin: 'a quiet little page',
 };
 
 // 拍立得互动栏：设计稿上的装饰数字，不接真实数据
 const DECOR_STATS = { like: '520', comment: '1314', star: '999' };
+
+// 每套模板可自定义的装饰文案；key 同时用于保存到导出偏好
+const TEMPLATE_TEXT_FIELDS = {
+    polaroid: [
+        { key: 'polaroidFooter', label: '底部一行', def: DECOR_TEXT.polaroid },
+    ],
+    collage: [
+        { key: 'collageQuote', label: '右侧摘抄', def: DECOR_TEXT.collage, multiline: true },
+    ],
+    diary: [
+        { key: 'diaryNote', label: '便签英文', def: DECOR_TEXT.polaroid, multiline: true },
+        { key: 'diaryMargin', label: '旁注', def: DECOR_TEXT.diaryMargin },
+    ],
+};
+
+const DEFAULT_DECOR_TEXTS = Object.values(TEMPLATE_TEXT_FIELDS)
+    .flat()
+    .reduce((acc, field) => { acc[field.key] = field.def; return acc; }, {});
+
+/** 合并用户文案与默认值：留空 / 非字符串时回退到默认语句 */
+function resolveDecorTexts(texts) {
+    const resolved = { ...DEFAULT_DECOR_TEXTS };
+    if (texts && typeof texts === 'object') {
+        Object.keys(resolved).forEach(key => {
+            const value = texts[key];
+            if (typeof value === 'string' && value.trim()) resolved[key] = value.trim();
+        });
+    }
+    return resolved;
+}
 
 const MONO_STACK = "'Courier New',Consolas,'Noto Sans Mono CJK SC','Sarasa Mono SC',monospace";
 const SERIF_EN = "Georgia,'Times New Roman',serif";
@@ -756,7 +787,8 @@ function drawArchive(ctx, d, t, layout) {
     const scale = d.font.scale;
 
     // 标题（菱形直接复用详情弹窗标题前的 ❖，和插件本体同一个字形）
-    const title = `${d.char} - ${d.chatName}`;
+    // 只保留对话名：角色名已经出现在下方的元信息里
+    const title = d.chatName || d.char;
     const titleSize = fitSingleLine(ctx, title, {
         size: 48 * Math.min(1, scale + 0.06),
         width: 800,
@@ -883,8 +915,8 @@ function drawPolaroid(ctx, d, t, layout) {
     ctx.stroke();
     ctx.restore();
 
-    // 标题
-    const title = `${d.char}-${d.chatName}`;
+    // 标题：只保留对话名
+    const title = d.chatName || d.char;
     const titleSize = fitSingleLine(ctx, title, {
         size: 46 * Math.min(1, scale + 0.04),
         width: 700,
@@ -956,8 +988,8 @@ function drawPolaroid(ctx, d, t, layout) {
 
     dashedLine(ctx, 100, height - 118, 980, height - 118, rgba(t.accent, 0.16), 1.4, [4, 7]);
 
-    // 底部一行英文（user 前缀替换为实际用户名，太长时自动缩）
-    const decorLine = `${d.user}: ${DECOR_TEXT.polaroid}`;
+    // 底部一行英文（user 前缀替换为实际用户名，太长时自动缩；文案可自定义）
+    const decorLine = `${d.user}: ${d.decor?.polaroidFooter || DECOR_TEXT.polaroid}`;
     const decorSize = fitSingleLine(ctx, decorLine, {
         size: 25 * scale, width: 860, stack: MONO_STACK, weight: '400', tracking: 0.3, minSize: 14,
     });
@@ -1146,7 +1178,8 @@ function drawCollageSheet(ctx, d, t, layout) {
     // 标题虚线框
     strokeDashRect(ctx, 70, 62, 940, 152, rgba(t.accent, 0.38), 2, [9, 7]);
 
-    const title = `${d.char} - ${d.chatName}`;
+    // 标题：只保留对话名
+    const title = d.chatName || d.char;
     const titleSize = fitSingleLine(ctx, title, {
         size: 56 * scale, width: 860, stack: d.font.stack, weight: '600', tracking: 3,
     });
@@ -1215,14 +1248,14 @@ function drawCollageSheet(ctx, d, t, layout) {
         d.char, rgba(t.accent, 0.9), d.font.stack,
     );
 
-    // 右侧英文摘抄：固定贴在头像下方，不随卡片长高往下漂。
+    // 右侧英文摘抄：固定贴在头像下方，不随卡片长高往下漂；文案可自定义。
     const userY = 706;
     const enTop = userY + 20;
     text(ctx, `${d.user}:`, boxX, userY, {
         size: 28 * scale, stack: d.font.stack, color: rgba(t.accent, 0.86), tracking: 0.6,
     });
 
-    const enBlock = fitTextBlock(ctx, DECOR_TEXT.collage, {
+    const enBlock = fitTextBlock(ctx, d.decor?.collageQuote || DECOR_TEXT.collage, {
         width: 250,
         // 方形卡片里也留足位置，把整段英文完整排出来（原来 100 会被截断）
         maxHeight: Math.max(100, 292 + layout.frameH - enTop - 16),
@@ -1307,20 +1340,31 @@ function drawPostcard(ctx, d, t, layout) {
         size: 12, stack: d.font.stack, color: rgba(t.ink, 0.36), tracking: 1.2,
     });
 
-    // 左侧竖排标题：不加边框，文字从上往下读
-    const title = `${d.char} - ${d.chatName}`;
-    const titleSize = fitSingleLine(ctx, title, {
-        size: 34 * scale, width: 460, stack: d.font.stack, weight: '600', tracking: 2, minSize: 16,
-    });
+    // 左侧竖排标题：文字从上往下堆叠，但每个字形保持直立（不再整体旋转 90°）
+    // 标题只保留对话名；过长时自动缩字号，仍放不下则末尾补省略号
+    const title = String(d.chatName || d.char || '');
+    const titleChars = Array.from(title);
+    const titleTop = 104;
+    const titleMaxH = 504;
+    const titleStepRatio = 1.2;
+    let titleSize = 34 * scale;
+    while (titleSize > 16 && titleChars.length * titleSize * titleStepRatio > titleMaxH) {
+        titleSize -= 1;
+    }
+    const titleStep = titleSize * titleStepRatio;
+    const titleMaxCount = Math.max(1, Math.floor(titleMaxH / titleStep));
+    let titleShown = titleChars;
+    if (titleShown.length > titleMaxCount) {
+        titleShown = titleShown.slice(0, titleMaxCount);
+        titleShown[titleMaxCount - 1] = '…';
+    }
     ctx.save();
-    ctx.translate(105 - titleSize * 0.4, 122);
-    ctx.rotate(Math.PI / 2);
-    text(ctx, title, 0, 0, {
-        size: titleSize,
-        stack: d.font.stack,
-        weight: '600',
-        color: mixColor(t.ink, t.accent, 0.32),
-        tracking: 2,
+    setFont(ctx, titleSize, d.font.stack, '600');
+    ctx.fillStyle = mixColor(t.ink, t.accent, 0.32);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    titleShown.forEach((ch, index) => {
+        ctx.fillText(ch, 104, titleTop + titleStep / 2 + index * titleStep);
     });
     ctx.restore();
 
@@ -1457,8 +1501,8 @@ function drawDiary(ctx, d, t, layout) {
     ctx.strokeRect(40, 40, 968, height - 96);
     ctx.restore();
 
-    // 首行只有标题，居中
-    const title = `${d.char} · ${d.chatName}`;
+    // 首行只有标题，居中；只保留对话名
+    const title = d.chatName || d.char;
     const titleSize = fitSingleLine(ctx, title, {
         size: 46 * scale, width: 760, stack: d.font.stack, weight: '600', tracking: 2, minSize: 20,
     });
@@ -1495,8 +1539,12 @@ function drawDiary(ctx, d, t, layout) {
         color: rgba(t.accent, 0.36),
         tracking: 1,
     });
-    text(ctx, 'a quiet little page', 150, decorY + 38, {
-        size: 20,
+    const marginText = d.decor?.diaryMargin || DECOR_TEXT.diaryMargin;
+    const marginSize = fitSingleLine(ctx, marginText, {
+        size: 20, width: 380, stack: SERIF_EN, weight: '400', style: 'italic', tracking: 0.8, minSize: 12,
+    });
+    text(ctx, marginText, 150, decorY + 38, {
+        size: marginSize,
         stack: SERIF_EN,
         style: 'italic',
         color: rgba(t.ink, 0.34),
@@ -1519,7 +1567,7 @@ function drawDiary(ctx, d, t, layout) {
         tracking: 0.5,
     });
 
-    const decor = fitTextBlock(ctx, DECOR_TEXT.polaroid, {
+    const decor = fitTextBlock(ctx, d.decor?.diaryNote || DECOR_TEXT.polaroid, {
         width: 344,
         maxHeight: 110,
         size: 18,
@@ -1668,6 +1716,7 @@ function layoutCard(templateId, data, appearance, options = {}) {
     const layout = template.layout(ctx, {
         ...data,
         font: { stack: font.stack, key: font.key, scale: step.scale },
+        decor: resolveDecorTexts(appearance?.texts),
     }, maxHeight);
     layout.width = CARD_W;
     layout.truncated = Boolean(layout.block?.truncated);
@@ -1712,6 +1761,7 @@ function renderCard(canvas, pixelWidth, templateId, data, appearance, options = 
     template.draw(ctx, {
         ...data,
         font: { stack: font.stack, key: font.key, scale: step.scale },
+        decor: resolveDecorTexts(appearance?.texts),
     }, theme, layout);
     ctx.restore();
     return canvas;
@@ -1872,20 +1922,21 @@ async function buildCardData(quote) {
 }
 
 // ============================================================
-// 七、导出偏好（模板 / 字号 / 字体 / 配色）
+// 七、导出偏好（模板 / 字号 / 字体 / 配色 / 文案）
 // ============================================================
 
 function readExportSettings() {
     const ctx = getShContext();
     const raw = ctx?.extensionSettings?.[EXPORT_SETTINGS_KEY];
     if (!raw || typeof raw !== 'object') {
-        return { templateId: 'archive', sizeKey: 'm', fontKey: 'song', colors: {} };
+        return { templateId: 'archive', sizeKey: 'm', fontKey: 'song', colors: {}, texts: {} };
     }
     return {
         templateId: TEMPLATE_BY_ID[raw.templateId] ? raw.templateId : 'archive',
         sizeKey: SIZE_STEPS.some(step => step.key === raw.sizeKey) ? raw.sizeKey : 'm',
         fontKey: FONT_BY_KEY[raw.fontKey] ? raw.fontKey : 'song',
         colors: (raw.colors && typeof raw.colors === 'object') ? raw.colors : {},
+        texts: (raw.texts && typeof raw.texts === 'object') ? raw.texts : {},
     };
 }
 
@@ -2210,6 +2261,49 @@ const UI_CSS = `
     color: rgba(var(--sa-ink-rgb, 74, 74, 74), 0.45);
     font-family: inherit; font-size: 10.5px; cursor: pointer; box-shadow: none;
 }
+#sa-export-overlay .sa-row[hidden] { display: none; }
+#sa-export-overlay .sa-texts {
+    display: flex; flex-direction: column; gap: 7px;
+    flex: 1; min-width: 0;
+}
+#sa-export-overlay .sa-text-field {
+    display: flex; flex-direction: column; gap: 3px;
+}
+#sa-export-overlay .sa-text-label {
+    font-size: 9.5px; letter-spacing: .8px;
+    color: rgba(var(--sa-ink-rgb, 74, 74, 74), 0.40);
+}
+#sa-export-overlay .sa-text-input {
+    width: 100%; box-sizing: border-box;
+    padding: 5px 8px;
+    border: 1px solid rgba(var(--sa-accent-rgb, 164, 80, 80), 0.22);
+    border-radius: 6px;
+    background: rgba(255, 255, 255, .45);
+    color: var(--sa-ink, #4A4A4A);
+    font-family: inherit; font-size: 11.5px; line-height: 1.5;
+    resize: none; outline: none;
+    transition: border-color .18s, background .18s;
+}
+#sa-export-overlay .sa-text-input:focus {
+    border-color: rgba(var(--sa-accent-rgb, 164, 80, 80), 0.55);
+    background: rgba(255, 255, 255, .8);
+}
+#sa-export-overlay .sa-text-input::placeholder {
+    color: rgba(var(--sa-ink-rgb, 74, 74, 74), 0.28);
+}
+#sa-export-overlay .sa-text-reset {
+    align-self: flex-start;
+    appearance: none; -webkit-appearance: none;
+    height: 24px; padding: 0 8px;
+    border: 1px dashed rgba(var(--sa-accent-rgb, 164, 80, 80), 0.30);
+    border-radius: 6px; background: transparent;
+    color: rgba(var(--sa-ink-rgb, 74, 74, 74), 0.45);
+    font-family: inherit; font-size: 10px; cursor: pointer; box-shadow: none;
+}
+#sa-export-overlay .sa-text-reset:hover {
+    color: var(--sa-accent-deep, #8b3a3a);
+    border-color: rgba(var(--sa-accent-rgb, 164, 80, 80), 0.50);
+}
 #sa-export-overlay .sa-hint {
     margin-top: 14px; font-size: 9.5px; line-height: 1.6;
     color: rgba(var(--sa-ink-rgb, 74, 74, 74), 0.35);
@@ -2330,6 +2424,9 @@ const UI_CSS = `
     }
     #sa-export-overlay .sa-color input[type="color"] { width: 26px; height: 24px; }
     #sa-export-overlay .sa-color-reset { height: 30px; padding: 0 11px; font-size: 11.5px; }
+    #sa-export-overlay .sa-text-label { font-size: 10.5px; }
+    #sa-export-overlay .sa-text-input { padding: 7px 10px; font-size: 13px; border-radius: 7px; }
+    #sa-export-overlay .sa-text-reset { height: 27px; padding: 0 10px; font-size: 11px; }
     #sa-export-overlay .sa-hint { margin-top: 18px; font-size: 11px; line-height: 1.7; }
     #sa-export-overlay .sa-export-foot { padding: 12px 18px 14px; gap: 10px; }
     #sa-export-overlay .sa-btn { height: 44px; font-size: 13px; letter-spacing: 1.6px; border-radius: 9px; }
@@ -2371,9 +2468,11 @@ class ExportPanel {
         this.settings = readExportSettings();
         this.step = 'template';
         this.toastTimer = 0;
+        this.textRepaintTimer = 0;
         this.renderToken = 0;
         this.busy = false;
         this.layoutCache = null;
+        this.textControlsFor = '';
         this.build();
     }
 
@@ -2416,12 +2515,16 @@ class ExportPanel {
                                 <div class="sa-row-label">字体</div>
                                 <div class="sa-chips" data-group="font"></div>
                             </div>
+                            <div class="sa-row" data-row="text" hidden>
+                                <div class="sa-row-label">文案</div>
+                                <div class="sa-texts"></div>
+                            </div>
                             <div class="sa-row">
                                 <div class="sa-row-label">配色</div>
                                 <div class="sa-colors"></div>
                             </div>
                         </div>
-                        <div class="sa-hint">字形取决于当前系统已安装的字体；卡片会随正文自动长高，最高到手机一屏；配色可分别调整纸色、墨色与强调色。</div>
+                        <div class="sa-hint">字形取决于当前系统已安装的字体；卡片会随正文自动长高，最高到手机一屏；配色可分别调整纸色、墨色与强调色；占位文案留空即恢复默认。</div>
                         <div class="sa-note" hidden></div>
                     </section>
                     <section class="sa-step" data-step="preview">
@@ -2444,6 +2547,8 @@ class ExportPanel {
         this.$toast = dialog.querySelector('.sa-toast');
         this.$grid = dialog.querySelector('.sa-tpl-grid');
         this.$steps = Array.from(dialog.querySelectorAll('.sa-step'));
+        this.$textRow = dialog.querySelector('.sa-row[data-row="text"]');
+        this.$texts = dialog.querySelector('.sa-texts');
         this.$adjustPreview = dialog.querySelector('.sa-adjust-preview canvas');
         this.$previewCanvas = dialog.querySelector('.sa-preview-wrap canvas');
         this.$zoom = dialog.querySelector('.sa-zoom');
@@ -2522,6 +2627,7 @@ class ExportPanel {
             sizeKey: this.settings.sizeKey,
             fontKey: this.settings.fontKey,
             colors: this.effectiveColors(templateId),
+            texts: this.settings.texts,
         };
     }
 
@@ -2634,7 +2740,91 @@ class ExportPanel {
         this.dialog.querySelectorAll('.sa-chips button').forEach(btn => {
             btn.classList.toggle('is-on', btn.dataset.value === this.settings.fontKey);
         });
+        this.syncTextControls();
         this.syncColorInputs();
+    }
+
+    /** 当前模板的装饰文案输入框；只有切换模板时才重建，避免打字时丢焦点 */
+    syncTextControls() {
+        const id = this.settings.templateId;
+        if (this.textControlsFor === id) return;
+        this.textControlsFor = id;
+
+        const fields = TEMPLATE_TEXT_FIELDS[id] || [];
+        this.$textRow.hidden = fields.length === 0;
+        this.$texts.innerHTML = '';
+        this.textInputs = {};
+
+        fields.forEach(field => {
+            const wrap = document.createElement('label');
+            wrap.className = 'sa-text-field';
+
+            const label = document.createElement('span');
+            label.className = 'sa-text-label';
+            label.textContent = field.label;
+
+            const input = document.createElement(field.multiline ? 'textarea' : 'input');
+            if (field.multiline) input.rows = 2;
+            else input.type = 'text';
+            input.className = 'sa-text-input';
+            input.value = this.decorValue(field.key);
+            input.placeholder = field.def;
+            input.spellcheck = false;
+
+            const autosize = () => {
+                if (!field.multiline) return;
+                input.style.height = 'auto';
+                input.style.height = `${Math.min(140, Math.max(44, input.scrollHeight))}px`;
+            };
+
+            input.addEventListener('input', () => {
+                this.setDecorText(field.key, input.value);
+                autosize();
+            });
+
+            wrap.appendChild(label);
+            wrap.appendChild(input);
+            this.$texts.appendChild(wrap);
+            this.textInputs[field.key] = input;
+            autosize();
+        });
+
+        // 留空同样会回退到默认文案；这里再给一个一键恢复的入口
+        if (fields.length) {
+            const reset = document.createElement('button');
+            reset.type = 'button';
+            reset.className = 'sa-text-reset';
+            reset.textContent = '恢复默认文案';
+            reset.addEventListener('click', () => {
+                const next = { ...(this.settings.texts || {}) };
+                fields.forEach(field => { delete next[field.key]; });
+                this.settings.texts = next;
+                saveExportSettings({ texts: next });
+                this.layoutCache = null;
+                fields.forEach(field => {
+                    const input = this.textInputs[field.key];
+                    if (!input) return;
+                    input.value = '';
+                    if (input.tagName === 'TEXTAREA') input.style.height = '';
+                });
+                this.repaintAdjust();
+            });
+            this.$texts.appendChild(reset);
+        }
+    }
+
+    decorValue(key) {
+        const raw = this.settings.texts?.[key];
+        return typeof raw === 'string' ? raw : '';
+    }
+
+    setDecorText(key, value) {
+        const next = { ...(this.settings.texts || {}), [key]: value };
+        this.settings.texts = next;
+        saveExportSettings({ texts: next });
+        this.layoutCache = null;
+        clearTimeout(this.textRepaintTimer);
+        this.textRepaintTimer = setTimeout(() => this.repaintAdjust(), 240);
     }
 
     syncColorInputs() {
@@ -2788,6 +2978,7 @@ class ExportPanel {
     async open(data) {
         this.data = data;
         this.layoutCache = null;
+        this.textControlsFor = '';
         this.settings = readExportSettings();
         if (this.settings.fontKey === 'kai') await ensureBundledKai();
         this.setStep('template');
@@ -2831,6 +3022,7 @@ class ExportPanel {
         this.dialog.classList.remove('is-on');
         this.$zoom?.classList.remove('is-on');
         this.hideToast();
+        clearTimeout(this.textRepaintTimer);
         this.data = null;
         this.layoutCache = null;
     }
