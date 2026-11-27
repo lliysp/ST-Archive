@@ -1237,10 +1237,6 @@ function setArchiveRenderLimit(value) {
     let archiveFallbackActive = false;
     let archiveHealthTimer = 0;
     let archiveHealthChecks = 0;
-    const ARCHIVE_HEALTH_MAX_WAITS = 3;
-    let archiveHealthWaits = 0;
-    const ARCHIVE_SPLASH_MAX_CHECKS = 10;
-    let archiveSplashChecks = 0;
 
     function isArchiveReady() {
         return Boolean(
@@ -1267,52 +1263,9 @@ function setArchiveRenderLimit(value) {
         }
     }
 
-    function showWelcomeReloadFallback() {
-        // 宿主先算：已有按钮如果挂错宿主，要搬过去，不能只按 ID 直接返回。
-        const host = document.querySelector('.splash-screen') || document.body;
-        const existing = document.getElementById('sa-archive-reload-fallback');
-        if (existing) {
-            if (existing.parentElement !== host) host.appendChild(existing);
-            return;
-        }
-
-        const box = document.createElement('div');
-        box.id = 'sa-archive-reload-fallback';
-        box.style.cssText = [
-            'position:fixed',
-            'left:50%',
-            'top:50%',
-            'transform:translate(-50%,-50%)',
-            'z-index:10000',
-            'display:flex',
-            'flex-direction:column',
-            'align-items:center',
-            'gap:12px',
-            'padding:20px 24px',
-            'border-radius:10px',
-            'background:var(--SmartThemeBlurTintColor,#fff)',
-            'color:var(--SmartThemeBodyColor,#333)',
-            'box-shadow:0 4px 24px rgba(0,0,0,.25)',
-            'font-size:14px',
-        ].join(';');
-        box.textContent = '首页加载失败';
-
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.textContent = '重新加载';
-        button.style.cssText = 'padding:8px 18px;border-radius:6px;border:1px solid var(--SmartThemeBorderColor,#999);background:transparent;color:inherit;cursor:pointer;font-size:14px;';
-        button.addEventListener('click', () => location.reload());
-
-        box.appendChild(button);
-        host.appendChild(box);
-    }
-
     function clearArchiveFallback() {
         archiveHealthChecks = 0;
-        archiveHealthWaits = 0;
-        archiveSplashChecks = 0;
         archiveView.failedSignature = '';
-        document.getElementById('sa-archive-reload-fallback')?.remove();
         if (!archiveFallbackActive && !document.body?.classList.contains('sa-archive-fallback')) return;
         archiveFallbackActive = false;
         document.body?.classList.remove('sa-archive-fallback');
@@ -1331,7 +1284,6 @@ function setArchiveRenderLimit(value) {
 
         archiveFallbackActive = true;
         archiveHealthChecks = 0;
-        archiveHealthWaits = 0;
 
         if (archiveHealthTimer) {
             clearTimeout(archiveHealthTimer);
@@ -1350,48 +1302,24 @@ function setArchiveRenderLimit(value) {
             return;
         }
 
-        // 酒馆还在启动遮罩后面时不要开始计时：慢设备上初始化本身就可能超过 12 秒。
-        // 遮罩长期不消失（酒馆初始化异常）时，用独立的启动计数器兜底。
-        const splash = document.querySelector('.splash-screen');
-        if (splash) {
-            archiveSplashChecks += 1;
-            if (archiveSplashChecks >= ARCHIVE_SPLASH_MAX_CHECKS) {
-                showWelcomeReloadFallback();
-            }
+        // 酒馆仍在启动遮罩后面：欢迎面板要等 APP_READY 才渲染，此时没有可接管的锚点。
+        // 这里只推迟健康检查，不计数、不归因、不显示任何插件 UI。
+        if (document.querySelector('.splash-screen')) {
             scheduleArchiveHealthCheck(3000);
             return;
-        }
-
-        // 遮罩消失：复位启动计数，并清掉可能挂在遮罩上的提示；
-        // 后续交给原来的欢迎页健康检查。
-        if (archiveSplashChecks > 0) {
-            archiveSplashChecks = 0;
-            document.getElementById('sa-archive-reload-fallback')?.remove();
         }
 
         const welcome = document.querySelector('#chat .welcomePanel');
         const nativeList = welcome?.querySelector('.recentChatList') || null;
 
-        // 欢迎页或原生列表还没出现：可能只是首页仍在加载。
-        // 只有能确认仍在欢迎首页时才继续等待；普通聊天页直接停止，不误伤。
+        // 原生欢迎面板或最近聊天列表尚未渲染：属于酒馆原生初始化范围。
+        // 插件还没有接管锚点，不归因、不加 fallback class、不显示重试按钮、不计插件失败次数。
+        // 只要确认仍停留在欢迎首页就继续静默等待；锚点出现后自动进入下面的插件检查。
         if (!welcome || !nativeList) {
             if (!isWelcomeHomepageExpected()) return;
-
-            if (archiveHealthWaits < ARCHIVE_HEALTH_MAX_WAITS) {
-                archiveHealthWaits += 1;
-                scheduleArchiveHealthCheck(3000);
-                return;
-            }
-
-            // 等待次数耗尽，确认仍是欢迎首页但面板始终没渲染出来：
-            // 给一个明确的重载入口，避免停在空白页。
-            enterArchiveFallback('欢迎首页未在预期时间内渲染');
-            showWelcomeReloadFallback();
+            scheduleArchiveHealthCheck(3000);
             return;
         }
-
-        // 欢迎页和列表都出现了，回到正常的等待计数。
-        archiveHealthWaits = 0;
 
         // 酒馆已经给出明确的空状态，不必再等。
         if (nativeList.querySelector('.noRecentChat')) {
