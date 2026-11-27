@@ -941,6 +941,7 @@ function setArchiveRenderLimit(value) {
     function createArchiveSkeleton() {
         const wrapper = document.createElement('div');
         wrapper.className = 'my-folded-wrapper';
+        wrapper.dataset.state = 'loading';
         wrapper.style.padding = '0 12px';
 
         const toolbar = document.createElement('div');
@@ -1053,7 +1054,14 @@ function setArchiveRenderLimit(value) {
 
     function buildArchive(nativeList, signature) {
         const collected = collectArchiveGroups(nativeList);
-        if (!collected.groups.length) return;
+        if (!collected.groups.length) {
+            // 酒馆已经明确渲染了“没有最近聊天/加载失败”的空状态：
+            // 不再让页面停在空白，先把原生列表放出来。
+            if (nativeList.querySelector('.noRecentChat')) {
+                enterArchiveFallback('酒馆最近聊天列表为空或加载失败');
+            }
+            return;
+        }
 
         disconnectArchiveObservers();
 
@@ -1070,21 +1078,209 @@ function setArchiveRenderLimit(value) {
 
         nativeList.insertAdjacentElement('afterend', wrapper);
         nativeList.style.display = 'none';
-        wrapper.dataset.signature = signature;
 
         renderArchivePage();
-        restoreArchiveScrollPosition();
+
+        // 只有渲染成功后才写签名：一次失败不会被后续轮询误判成“已经建好”。
+        wrapper.dataset.signature = signature;
+        wrapper.dataset.state = 'ready';
+        clearArchiveFallback();
+
+        // 滚动恢复失败不应该让已经建好的档案馆回退
+        try {
+            restoreArchiveScrollPosition();
+        } catch (error) {
+            console.warn('[ST-档案馆] 恢复首页滚动位置失败', error);
+        }
+    }
+
+    // ==================================================
+    // 首页接管失败时的兜底
+    // 正常路径不会走到这里；只有超时或异常时才把原生最近聊天列表放出来。
+    // ==================================================
+    let archiveFallbackActive = false;
+    let archiveHealthTimer = 0;
+    let archiveHealthChecks = 0;
+    const ARCHIVE_HEALTH_MAX_WAITS = 3;
+    let archiveHealthWaits = 0;
+    const ARCHIVE_SPLASH_MAX_CHECKS = 10;
+    let archiveSplashChecks = 0;
+
+    function isArchiveReady() {
+        return Boolean(
+            archiveView.wrapper?.isConnected
+            && archiveView.wrapper.dataset.state === 'ready'
+            && archiveView.listContainer?.isConnected
+        );
+    }
+
+    // 只有能确认“当前没有打开的聊天、聊天数组为空”时，才认为仍在等待欢迎首页。
+    // 普通聊天页（包括刚建好但还没有消息的聊天）的 getCurrentChatId() 是字符串，不会命中。
+    function isWelcomeHomepageExpected() {
+        const context = getArchiveContext();
+        if (!context) return false;
+        try {
+            const chatId = typeof context.getCurrentChatId === 'function'
+                ? context.getCurrentChatId()
+                : context.chatId;
+            if (chatId !== undefined) return false;
+            return Array.isArray(context.chat) && context.chat.length === 0;
+        } catch (error) {
+            console.warn('[ST-档案馆] 判断首页状态失败', error);
+            return false;
+        }
+    }
+
+    function showWelcomeReloadFallback() {
+        // 宿主先算：已有按钮如果挂错宿主，要搬过去，不能只按 ID 直接返回。
+        const host = document.querySelector('.splash-screen') || document.body;
+        const existing = document.getElementById('sa-archive-reload-fallback');
+        if (existing) {
+            if (existing.parentElement !== host) host.appendChild(existing);
+            return;
+        }
+
+        const box = document.createElement('div');
+        box.id = 'sa-archive-reload-fallback';
+        box.style.cssText = [
+            'position:fixed',
+            'left:50%',
+            'top:50%',
+            'transform:translate(-50%,-50%)',
+            'z-index:10000',
+            'display:flex',
+            'flex-direction:column',
+            'align-items:center',
+            'gap:12px',
+            'padding:20px 24px',
+            'border-radius:10px',
+            'background:var(--SmartThemeBlurTintColor,#fff)',
+            'color:var(--SmartThemeBodyColor,#333)',
+            'box-shadow:0 4px 24px rgba(0,0,0,.25)',
+            'font-size:14px',
+        ].join(';');
+        box.textContent = '首页加载失败';
+
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = '重新加载';
+        button.style.cssText = 'padding:8px 18px;border-radius:6px;border:1px solid var(--SmartThemeBorderColor,#999);background:transparent;color:inherit;cursor:pointer;font-size:14px;';
+        button.addEventListener('click', () => location.reload());
+
+        box.appendChild(button);
+        host.appendChild(box);
+    }
+
+    function clearArchiveFallback() {
+        archiveHealthChecks = 0;
+        archiveHealthWaits = 0;
+        archiveSplashChecks = 0;
+        document.getElementById('sa-archive-reload-fallback')?.remove();
+        if (!archiveFallbackActive && !document.body?.classList.contains('sa-archive-fallback')) return;
+        archiveFallbackActive = false;
+        document.body?.classList.remove('sa-archive-fallback');
+    }
+
+    function enterArchiveFallback(reason) {
+        if (archiveFallbackActive) return;
+        archiveFallbackActive = true;
+        archiveHealthChecks = 0;
+        archiveHealthWaits = 0;
+
+        if (archiveHealthTimer) {
+            clearTimeout(archiveHealthTimer);
+            archiveHealthTimer = 0;
+        }
+
+        document.body?.classList.add('sa-archive-fallback');
+        const nativeList = document.querySelector('.recentChatList');
+        if (nativeList) nativeList.style.display = '';
+
+        console.warn('[ST-档案馆] 首页接管失败，已回退到酒馆原生最近聊天列表', reason);
+    }
+
+    function checkArchiveHealth() {
+        if (isArchiveReady()) {
+            clearArchiveFallback();
+            return;
+        }
+
+        // 酒馆还在启动遮罩后面时不要开始计时：慢设备上初始化本身就可能超过 12 秒。
+        // 遮罩长期不消失（酒馆初始化异常）时，用独立的启动计数器兜底。
+        const splash = document.querySelector('.splash-screen');
+        if (splash) {
+            archiveSplashChecks += 1;
+            if (archiveSplashChecks >= ARCHIVE_SPLASH_MAX_CHECKS) {
+                showWelcomeReloadFallback();
+            }
+            scheduleArchiveHealthCheck(3000);
+            return;
+        }
+
+        // 遮罩消失：复位启动计数，并清掉可能挂在遮罩上的提示；
+        // 后续交给原来的欢迎页健康检查。
+        if (archiveSplashChecks > 0) {
+            archiveSplashChecks = 0;
+            document.getElementById('sa-archive-reload-fallback')?.remove();
+        }
+
+        const welcome = document.querySelector('#chat .welcomePanel');
+        const nativeList = welcome?.querySelector('.recentChatList') || null;
+
+        // 欢迎页或原生列表还没出现：可能只是首页仍在加载。
+        // 只有能确认仍在欢迎首页时才继续等待；普通聊天页直接停止，不误伤。
+        if (!welcome || !nativeList) {
+            if (!isWelcomeHomepageExpected()) return;
+
+            if (archiveHealthWaits < ARCHIVE_HEALTH_MAX_WAITS) {
+                archiveHealthWaits += 1;
+                scheduleArchiveHealthCheck(3000);
+                return;
+            }
+
+            // 等待次数耗尽，确认仍是欢迎首页但面板始终没渲染出来：
+            // 给一个明确的重载入口，避免停在空白页。
+            enterArchiveFallback('欢迎首页未在预期时间内渲染');
+            showWelcomeReloadFallback();
+            return;
+        }
+
+        // 欢迎页和列表都出现了，回到正常的等待计数。
+        archiveHealthWaits = 0;
+
+        // 酒馆已经给出明确的空状态，不必再等。
+        if (nativeList.querySelector('.noRecentChat')) {
+            enterArchiveFallback('酒馆最近聊天列表为空或加载失败');
+            return;
+        }
+
+        archiveHealthChecks += 1;
+        if (archiveHealthChecks < 2) {
+            scheduleArchiveHealthCheck(3000);
+            return;
+        }
+
+        enterArchiveFallback('档案馆未在预期时间内完成渲染');
+    }
+
+    function scheduleArchiveHealthCheck(delay = 3000) {
+        if (archiveHealthTimer || archiveFallbackActive) return;
+        archiveHealthTimer = setTimeout(() => {
+            archiveHealthTimer = 0;
+            checkArchiveHealth();
+        }, delay);
     }
 
     function renderArchiveList() {
         const nativeList = document.querySelector('.recentChatList');
         if (!nativeList) return;
 
-        const signature = computeNativeSignature(nativeList);
         try {
+            const signature = computeNativeSignature(nativeList);
             buildArchive(nativeList, signature);
         } catch (error) {
             console.warn('[ST-档案馆] 重建首页档案馆失败', error);
+            if (!isArchiveReady()) enterArchiveFallback(error);
         }
     }
 
@@ -1097,18 +1293,29 @@ function setArchiveRenderLimit(value) {
         const nativeList = document.querySelector('.recentChatList');
         if (!nativeList) return;
 
-        const signature = computeNativeSignature(nativeList);
-        const wrapper = nativeList.parentElement?.querySelector('.my-folded-wrapper');
-
-        if (wrapper && wrapper.isConnected && wrapper.dataset.signature === signature) {
-            if (nativeList.style.display !== 'none') nativeList.style.display = 'none';
-            return;
-        }
-
         try {
+            const signature = computeNativeSignature(nativeList);
+            const wrapper = nativeList.parentElement?.querySelector('.my-folded-wrapper');
+
+            if (wrapper && wrapper.isConnected
+                && wrapper.dataset.state === 'ready'
+                && wrapper.dataset.signature === signature) {
+                if (nativeList.style.display !== 'none') nativeList.style.display = 'none';
+                clearArchiveFallback();
+                return;
+            }
+
             buildArchive(nativeList, signature);
         } catch (error) {
             console.warn('[ST-档案馆] 重建首页档案馆失败', error);
+            // 壳已经插进去了就再给一次机会；连壳都没有则立刻回退，避免纯白屏。
+            if (!archiveView.wrapper?.isConnected) {
+                enterArchiveFallback(error);
+            } else {
+                scheduleArchiveHealthCheck(3000);
+            }
+        } finally {
+            if (!isArchiveReady()) scheduleArchiveHealthCheck();
         }
     }
 
@@ -1154,6 +1361,8 @@ function setArchiveRenderLimit(value) {
     }
 
     observeChatContainer();
+    // 首次加载的健康检查：如果欢迎页在预期时间内没有出现可用的档案馆，回退原生列表。
+    scheduleArchiveHealthCheck();
     // 从别的窗口切回来时补一次，避免被遮挡期间错过重建
     document.addEventListener('visibilitychange', () => {
         if (!document.hidden) queueArchiveRender();

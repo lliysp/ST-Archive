@@ -690,3 +690,59 @@ body:has(#chat .welcomePanel) #chat > div.mes[mesid="0"][ch_name="Assistant"] { 
 .quote-load-more:hover {
     color: var(--sa-accent, #a45050);
 }
+
+/* ==================================================
+   🚨 档案馆接管失败时的回退
+   只有 JS 明确判定失败、给 body 加上 .sa-archive-fallback 后才会命中。
+   正常加载不会应用这些规则，所以不会破坏原来的防闪屏。
+   ================================================== */
+body.sa-archive-fallback #chat .welcomePanel .recentChatList {
+    display: flex !important;
+}
+
+body.sa-archive-fallback #chat .welcomePanel {
+    padding: 10px !important;
+    padding-top: 10px !important;
+    max-width: none !important;
+    margin: 0 !important;
+    align-items: stretch !important;
+}
+
+body.sa-archive-fallback #top-bar {
+    display: inline-block !important;
+}
+
+body.sa-archive-fallback .welcomeHeader {
+    display: flex !important;
+}
+
+body.sa-archive-fallback .welcomeHeaderTitle {
+    display: flex !important;
+}
+
+/* :has() 可用时提高优先级，覆盖插件自己的顶部栏 / 欢迎消息隐藏规则；
+   不支持 :has() 的旧内核里，插件那两条隐藏规则本来也不会生效。 */
+@supports selector(:has(*)) {
+    body.sa-archive-fallback:has(#chat .welcomePanel) #top-bar {
+        display: inline-block !important;
+    }
+
+    body.sa-archive-fallback:has(#chat .welcomePanel) #chat > div.mes[type="assistant_message"],
+    body.sa-archive-fallback:has(#chat .welcomePanel) #chat > div.mes[mesid="0"][ch_name="Assistant"] {
+        display: flex !important;
+    }
+}
+
+body.sa-archive-fallback .my-folded-wrapper {
+    display: none !important;
+}
+
+body.sa-archive-fallback .welcomeRecent::before,
+body.sa-archive-fallback .welcomeRecent::after {
+    display: none !important;
+}
+
+body.sa-archive-fallback .welcomePanel.recentHidden .welcomeRecent,
+body.sa-archive-fallback .welcomePanel.recentHidden .recentChatsTitle {
+    display: block !important;
+}
