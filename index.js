@@ -464,7 +464,7 @@ function setArchiveRenderLimit(value) {
         const nativeList = document.querySelector('.recentChatList');
         if (nativeList) nativeList.style.display = 'none';
 
-        renderArchiveList();
+        renderArchiveList({ userInitiated: true });
     }
 
     // 手机软键盘弹出、地址栏伸缩、横竖屏切换时，保持 limit 弹窗留在可见视口内
@@ -555,6 +555,7 @@ function setArchiveRenderLimit(value) {
         groupByKey: new Map(),
         chatsByOrder: new Map(),
         observers: [],
+        failedSignature: '',
     };
 
     function computeNativeSignature(nativeList) {
@@ -640,9 +641,12 @@ function setArchiveRenderLimit(value) {
     }
 
     function buildArchiveHeaderHtml(group) {
+        const name = String(group.name ?? '');
+        const tags = Array.isArray(group.tags) ? group.tags : [];
+        const chatCount = Array.isArray(group.chats) ? group.chats.length : 0;
         const isPinnedChar = archiveUiState.pinnedCharKeys.has(group.key)
-            || archiveUiState.pinnedCharNames.has(group.name);
-        const tagsHtml = group.tags
+            || archiveUiState.pinnedCharNames.has(name);
+        const tagsHtml = tags
             .map(tag => `<span class="my-tag">${escapeHtml(tag)}</span>`)
             .join('');
 
@@ -651,12 +655,12 @@ function setArchiveRenderLimit(value) {
                 <div class="my-fold-header-left">
                     <div class="my-name-row">
                         <span class="icon">❖</span>
-                        <span class="my-header-name">${escapeHtml(group.name)}</span>
+                        <span class="my-header-name">${escapeHtml(name)}</span>
                     </div>
                     <div class="my-header-tags">${tagsHtml}</div>
                 </div>
                 <div class="my-fold-header-right">
-                    <span class="archive-count">${group.chats.length} 个存档</span>
+                    <span class="archive-count">${chatCount} 个存档</span>
                     <i class="fa-solid fa-star my-pin-btn ${isPinnedChar ? 'pinned' : ''}" title="置顶角色"></i>
                 </div>
             </div>
@@ -690,20 +694,76 @@ function setArchiveRenderLimit(value) {
      * 只在元素快被滚动到时才继续放下一批。
      * 这就是“往下滑也不卡”的关键：浏览器不需要为屏幕外的东西提前排版。
      */
+    // 事务式页面渲染期间，旧页面的懒加载回调只允许自断观察器，
+    // 不能追加旧 DOM，也不能把新观察器写进新页面的集合。
+    let archiveRenderInProgress = false;
+
     function observeArchiveReveal(element, callback) {
         let revealed = false;
         let observer = null;
+        const observerList = archiveView.observers;
 
-        const reveal = () => {
-            if (revealed) return;
-            revealed = true;
-            if (observer) {
-                try { observer.disconnect(); } catch (error) { /* 忽略 */ }
-                archiveView.observers = archiveView.observers.filter(item => item !== observer);
+        function disconnectObserver() {
+            if (!observer) return;
+            try { observer.disconnect(); } catch (error) { /* 忽略 */ }
+            const index = observerList.indexOf(observer);
+            if (index >= 0) observerList.splice(index, 1);
+            observer = null;
+        }
+
+        function observe() {
+            if (typeof IntersectionObserver !== 'function') return false;
+            const root = document.getElementById('chat');
+            try {
+                observer = new IntersectionObserver(entries => {
+                    if (!entries.some(entry => entry.isIntersecting)) return;
+                    reveal();
+                }, { root: root || null, rootMargin: '700px 0px' });
+                observer.observe(element);
+                observerList.push(observer);
+                return true;
+            } catch (error) {
+                console.warn('[ST-档案馆] 载入更多观察器创建失败', error);
+                disconnectObserver();
+                return false;
             }
+        }
+
+        function reveal() {
+            if (revealed) return;
+            if (archiveRenderInProgress && element.isConnected) {
+                // 旧页面在事务期间触发：只断开自己，保留按钮点击兜底；
+                // 不追加旧 DOM，也不创建会污染新页面集合的观察器。
+                disconnectObserver();
+                revealed = false;
+                return;
+            }
+            if (!archiveRenderInProgress
+                && (!element.isConnected || !archiveView.listContainer?.contains(element))) {
+                // 延迟回调命中了已经被替换掉的旧 DOM：只断开自己，不再执行 callback。
+                disconnectObserver();
+                revealed = false;
+                return;
+            }
+            revealed = true;
+            disconnectObserver();
+
+            let ok = false;
+            try {
+                ok = callback() !== false;
+            } catch (error) {
+                console.warn('[ST-档案馆] 载入更多失败', error);
+            }
+
+            if (!ok) {
+                // 失败时按钮仍在原位，保留点击兜底；不自动重新 observe，避免反复重试。
+                revealed = false;
+                return;
+            }
+
+            // 成功后才移除旧按钮；新批次可能已经带了自己的“载入更多”按钮。
             element.remove();
-            callback();
-        };
+        }
 
         // 除了自动加载，也给用户一个“点一下也能加载”的兜底
         element.addEventListener('click', reveal);
@@ -713,14 +773,7 @@ function setArchiveRenderLimit(value) {
             return;
         }
 
-        const root = document.getElementById('chat');
-        observer = new IntersectionObserver(entries => {
-            if (!entries.some(entry => entry.isIntersecting)) return;
-            reveal();
-        }, { root: root || null, rootMargin: '700px 0px' });
-
-        observer.observe(element);
-        archiveView.observers.push(observer);
+        observe();
     }
 
     function disconnectArchiveObservers() {
@@ -731,33 +784,61 @@ function setArchiveRenderLimit(value) {
     }
 
     function appendArchiveChatRows(container, group, start) {
-        const end = Math.min(group.chats.length, start + ARCHIVE_ROWS_PER_CHUNK);
-        if (end <= start) return;
+        try {
+            const chats = Array.isArray(group.chats) ? group.chats : [];
+            const end = Math.min(chats.length, start + ARCHIVE_ROWS_PER_CHUNK);
+            if (end <= start) return true;
 
-        const holder = document.createElement('div');
-        holder.innerHTML = group.chats.slice(start, end).map(buildArchiveChatRowHtml).join('');
+            let failedRows = 0;
+            const html = chats.slice(start, end).map(chat => {
+                try {
+                    return buildArchiveChatRowHtml(chat);
+                } catch (error) {
+                    failedRows += 1;
+                    console.warn('[ST-档案馆] 聊天记录渲染失败', chat?.fileKey, error);
+                    return '';
+                }
+            }).join('');
 
-        const fragment = document.createDocumentFragment();
-        while (holder.firstChild) fragment.appendChild(holder.firstChild);
-        container.appendChild(fragment);
+            const holder = document.createElement('div');
+            holder.innerHTML = html;
 
-        if (end < group.chats.length) {
-            const more = document.createElement('button');
-            more.type = 'button';
-            more.className = 'archive-load-more';
-            more.textContent = '载入更多 ···';
-            container.appendChild(more);
-            observeArchiveReveal(more, () => appendArchiveChatRows(container, group, end));
+            // 本批次的行和“载入更多”按钮先在 detached fragment 里准备好，再一次性挂载。
+            const fragment = document.createDocumentFragment();
+            while (holder.firstChild) fragment.appendChild(holder.firstChild);
+
+            let more = null;
+            if (end < chats.length) {
+                more = document.createElement('button');
+                more.type = 'button';
+                more.className = 'archive-load-more';
+                more.textContent = '载入更多 ···';
+                fragment.appendChild(more);
+            }
+
+            container.appendChild(fragment);
+
+            if (failedRows > 0) {
+                console.warn(`[ST-档案馆] 本批 ${end - start} 条记录中有 ${failedRows} 条渲染失败，已跳过`, group?.key);
+            }
+
+            if (more) {
+                observeArchiveReveal(more, () => appendArchiveChatRows(container, group, end));
+            }
+            return true;
+        } catch (error) {
+            console.warn('[ST-档案馆] 加载聊天记录失败', group?.key, error);
+            return false;
         }
     }
 
-    function createArchiveGroupElement(group) {
+    function createArchiveGroupShell(group) {
         const groupDiv = document.createElement('div');
         groupDiv.className = 'my-fold-group';
         if (archiveUiState.openGroups.has(group.key)) groupDiv.classList.add('is-open');
         groupDiv.dataset.key = group.key;
-        groupDiv.dataset.name = group.name.toLowerCase();
-        groupDiv.dataset.tags = group.tags.join(',').toLowerCase();
+        groupDiv.dataset.name = String(group.name ?? '').toLowerCase();
+        groupDiv.dataset.tags = (Array.isArray(group.tags) ? group.tags : []).join(',').toLowerCase();
         groupDiv.dataset.order = String(group.order);
         groupDiv.innerHTML = buildArchiveHeaderHtml(group);
 
@@ -768,52 +849,95 @@ function setArchiveRenderLimit(value) {
         content.appendChild(inner);
         groupDiv.appendChild(content);
 
-        // 默认收起的组不建任何聊天行；展开时才建第一批。
-        if (groupDiv.classList.contains('is-open')) {
-            inner.dataset.built = '1';
-            appendArchiveChatRows(inner, group, 0);
-        }
-
-        return groupDiv;
+        return { groupDiv, inner };
     }
 
-    function renderArchivePage() {
+    function renderArchivePage({ resetPage = false, pageOverride = null } = {}) {
         const container = archiveView.listContainer;
         if (!container) return;
 
-        disconnectArchiveObservers();
-        container.replaceChildren();
+        // 构建期间旧 DOM 保持不动；新观察器先写入临时数组，提交成功后才断开旧观察器。
+        const previousObservers = archiveView.observers;
+        archiveView.observers = [];
+        let totalPages = 1;
+        let page = 1;
+        archiveRenderInProgress = true;
 
-        const keyword = String(archiveUiState.search || '').toLowerCase().trim();
-        const sortBy = archiveUiState.sort || 'time-desc';
+        try {
+            const keyword = String(archiveUiState.search || '').toLowerCase().trim();
+            const sortBy = archiveUiState.sort || 'time-desc';
 
-        const filtered = archiveView.groups.filter(group => {
-            if (!keyword) return true;
-            if (group.name.toLowerCase().includes(keyword)) return true;
-            return group.tags.some(tag => String(tag).toLowerCase().includes(keyword));
-        });
+            const filtered = archiveView.groups.filter(group => {
+                if (!keyword) return true;
+                if (String(group.name ?? '').toLowerCase().includes(keyword)) return true;
+                const tags = Array.isArray(group.tags) ? group.tags : [];
+                return tags.some(tag => String(tag).toLowerCase().includes(keyword));
+            });
 
-        filtered.sort((a, b) => {
-            const pinnedA = archiveUiState.pinnedCharKeys.has(a.key) || archiveUiState.pinnedCharNames.has(a.name) ? 1 : 0;
-            const pinnedB = archiveUiState.pinnedCharKeys.has(b.key) || archiveUiState.pinnedCharNames.has(b.name) ? 1 : 0;
-            if (pinnedA !== pinnedB) return pinnedB - pinnedA;
+            filtered.sort((a, b) => {
+                const pinnedA = archiveUiState.pinnedCharKeys.has(a.key) || archiveUiState.pinnedCharNames.has(a.name) ? 1 : 0;
+                const pinnedB = archiveUiState.pinnedCharKeys.has(b.key) || archiveUiState.pinnedCharNames.has(b.name) ? 1 : 0;
+                if (pinnedA !== pinnedB) return pinnedB - pinnedA;
 
-            if (sortBy === 'time-asc') return b.order - a.order;
-            if (sortBy === 'name-asc') return a.name.localeCompare(b.name);
-            if (sortBy === 'name-desc') return b.name.localeCompare(a.name);
-            return a.order - b.order; // time-desc
-        });
+                if (sortBy === 'time-asc') return b.order - a.order;
+                if (sortBy === 'name-asc') return String(a.name ?? '').localeCompare(String(b.name ?? ''));
+                if (sortBy === 'name-desc') return String(b.name ?? '').localeCompare(String(a.name ?? ''));
+                return a.order - b.order; // time-desc
+            });
 
-        const totalPages = Math.max(1, Math.ceil(filtered.length / ARCHIVE_PAGE_SIZE));
-        const page = Math.min(Math.max(1, Number(archiveUiState.page) || 1), totalPages);
-        archiveUiState.page = page;
+            totalPages = Math.max(1, Math.ceil(filtered.length / ARCHIVE_PAGE_SIZE));
+            const requestedPage = resetPage ? 1 : (pageOverride ?? archiveUiState.page);
+            page = Math.min(Math.max(1, Number(requestedPage) || 1), totalPages);
 
-        const startIndex = (page - 1) * ARCHIVE_PAGE_SIZE;
-        const pageGroups = filtered.slice(startIndex, startIndex + ARCHIVE_PAGE_SIZE);
+            const startIndex = (page - 1) * ARCHIVE_PAGE_SIZE;
+            const pageGroups = filtered.slice(startIndex, startIndex + ARCHIVE_PAGE_SIZE);
 
-        const fragment = document.createDocumentFragment();
-        pageGroups.forEach(group => fragment.appendChild(createArchiveGroupElement(group)));
-        container.appendChild(fragment);
+            // 先在 detached fragment 里构建完整页面，全部完成后再一次性替换旧内容。
+            const fragment = document.createDocumentFragment();
+            for (const group of pageGroups) {
+                let shell;
+                try {
+                    shell = createArchiveGroupShell(group);
+                } catch (error) {
+                    console.warn('[ST-档案馆] 档案组渲染失败', group?.key, error);
+                    continue;
+                }
+
+                fragment.appendChild(shell.groupDiv);
+
+                if (shell.groupDiv.classList.contains('is-open')) {
+                    try {
+                        if (appendArchiveChatRows(shell.inner, group, 0)) {
+                            shell.inner.dataset.built = '1';
+                        } else {
+                            delete shell.inner.dataset.built;
+                        }
+                    } catch (error) {
+                        delete shell.inner.dataset.built;
+                        console.warn('[ST-档案馆] 档案组内容渲染失败', group?.key, error);
+                    }
+                }
+            }
+
+            container.replaceChildren(fragment);
+
+            // DOM 已替换成功，此时才提交页码状态；事务失败时旧页面和旧页码保持一致。
+            archiveUiState.page = page;
+
+            // 提交成功后再断开旧内容的观察器；失败时旧内容还活着，观察器也保留。
+            previousObservers.forEach(observer => {
+                try { observer.disconnect(); } catch (error) { /* 忽略 */ }
+            });
+        } catch (error) {
+            // 构建失败：丢弃新观察器，恢复旧观察器，旧 DOM 保持不动。
+            archiveView.observers.forEach(observer => {
+                try { observer.disconnect(); } catch (e) { /* 忽略 */ }
+            });
+            archiveView.observers = previousObservers;
+            throw error;
+        } finally {
+            archiveRenderInProgress = false;
+        }
 
         if (archiveView.pageInfo) archiveView.pageInfo.innerText = `${page} / ${totalPages}`;
         if (archiveView.pagination) archiveView.pagination.style.display = 'flex';
@@ -825,9 +949,23 @@ function setArchiveRenderLimit(value) {
             archiveView.prevBtn.disabled = page === 1;
             archiveView.nextBtn.disabled = page === totalPages;
         }
+    }
 
-        // 记住当前界面状态，供下一次重建恢复
-        archiveUiState.page = page;
+    // 事件处理器和异步回调统一走这里。renderArchivePage 本身是事务式的：
+    // 失败时旧 DOM、旧页码和旧 Observer 都保持不动；这里只负责记录并决定是否需要健康检查。
+    // 不自动重试，避免异常时反复排队渲染。
+    function safeRenderArchivePage(options = {}, context = '档案馆重绘') {
+        try {
+            renderArchivePage(options);
+            // 用户主动重绘成功且档案馆确实可用时，解除“同签名失败”锁；
+            // 失败或仍未 ready 时保留，避免自动循环重试。
+            if (isArchiveReady()) archiveView.failedSignature = '';
+            return true;
+        } catch (error) {
+            console.warn(`[ST-档案馆] ${context}渲染失败，保留旧内容`, error);
+            if (!isArchiveReady()) scheduleArchiveHealthCheck();
+            return false;
+        }
     }
 
     function refreshPinnedCharSets() {
@@ -850,8 +988,7 @@ function setArchiveRenderLimit(value) {
         persistArchiveState();
         refreshPinnedCharSets();
         // 置顶会让排序变化，回到第一页才能立刻看到刚置顶的角色（和旧版一致）
-        archiveUiState.page = 1;
-        renderArchivePage();
+        safeRenderArchivePage({ resetPage: true }, '角色置顶重绘');
     }
 
     function toggleArchiveChatPin(chat, group) {
@@ -870,7 +1007,7 @@ function setArchiveRenderLimit(value) {
         if (group) group.chats.sort(compareArchiveChats);
 
         persistArchiveState();
-        renderArchivePage();
+        safeRenderArchivePage({}, '聊天置顶重绘');
     }
 
     function handleArchiveListClick(event) {
@@ -898,8 +1035,11 @@ function setArchiveRenderLimit(value) {
                 const inner = groupEl.querySelector('.my-fold-content-inner');
                 if (inner && !inner.dataset.built) {
                     const group = archiveView.groupByKey.get(key);
-                    inner.dataset.built = '1';
-                    if (group) appendArchiveChatRows(inner, group, 0);
+                    if (group && appendArchiveChatRows(inner, group, 0)) {
+                        inner.dataset.built = '1';
+                    } else {
+                        delete inner.dataset.built;
+                    }
                 }
             } else {
                 archiveUiState.openGroups.delete(key);
@@ -1000,8 +1140,7 @@ function setArchiveRenderLimit(value) {
         let searchTimer = 0;
         const applySearchNow = (resetPage) => {
             archiveUiState.search = searchInput.value;
-            if (resetPage) archiveUiState.page = 1;
-            renderArchivePage();
+            safeRenderArchivePage({ resetPage }, '搜索重绘');
         };
 
         searchInput.addEventListener('input', () => {
@@ -1023,17 +1162,14 @@ function setArchiveRenderLimit(value) {
         });
         sortSelect.addEventListener('change', () => {
             archiveUiState.sort = sortSelect.value;
-            archiveUiState.page = 1;
-            renderArchivePage();
+            safeRenderArchivePage({ resetPage: true }, '排序重绘');
         });
         prevBtn.addEventListener('click', () => {
             if (archiveUiState.page <= 1) return;
-            archiveUiState.page -= 1;
-            renderArchivePage();
+            safeRenderArchivePage({ pageOverride: archiveUiState.page - 1 }, '上一页重绘');
         });
         nextBtn.addEventListener('click', () => {
-            archiveUiState.page += 1;
-            renderArchivePage();
+            safeRenderArchivePage({ pageOverride: archiveUiState.page + 1 }, '下一页重绘');
         });
 
         // 整页只挂一个点击监听：哪怕一页有几百行，也不会产生几百个监听器。
@@ -1175,6 +1311,7 @@ function setArchiveRenderLimit(value) {
         archiveHealthChecks = 0;
         archiveHealthWaits = 0;
         archiveSplashChecks = 0;
+        archiveView.failedSignature = '';
         document.getElementById('sa-archive-reload-fallback')?.remove();
         if (!archiveFallbackActive && !document.body?.classList.contains('sa-archive-fallback')) return;
         archiveFallbackActive = false;
@@ -1183,6 +1320,15 @@ function setArchiveRenderLimit(value) {
 
     function enterArchiveFallback(reason) {
         if (archiveFallbackActive) return;
+
+        const nativeList = document.querySelector('.recentChatList');
+        try {
+            archiveView.failedSignature = computeNativeSignature(nativeList);
+        } catch (error) {
+            archiveView.failedSignature = '';
+            console.warn('[ST-档案馆] 计算原生列表签名失败，继续执行回退', error);
+        }
+
         archiveFallbackActive = true;
         archiveHealthChecks = 0;
         archiveHealthWaits = 0;
@@ -1193,7 +1339,6 @@ function setArchiveRenderLimit(value) {
         }
 
         document.body?.classList.add('sa-archive-fallback');
-        const nativeList = document.querySelector('.recentChatList');
         if (nativeList) nativeList.style.display = '';
 
         console.warn('[ST-档案馆] 首页接管失败，已回退到酒馆原生最近聊天列表', reason);
@@ -1271,9 +1416,13 @@ function setArchiveRenderLimit(value) {
         }, delay);
     }
 
-    function renderArchiveList() {
+    function renderArchiveList({ userInitiated = false } = {}) {
         const nativeList = document.querySelector('.recentChatList');
         if (!nativeList) return;
+
+        // 只有用户主动修改渲染上限时才允许解除“同签名失败”锁；
+        // 其他未来可能出现的自动调用默认不清除。
+        if (userInitiated) archiveView.failedSignature = '';
 
         try {
             const signature = computeNativeSignature(nativeList);
@@ -1293,8 +1442,13 @@ function setArchiveRenderLimit(value) {
         const nativeList = document.querySelector('.recentChatList');
         if (!nativeList) return;
 
+        let signature = '';
         try {
-            const signature = computeNativeSignature(nativeList);
+            signature = computeNativeSignature(nativeList);
+
+            // 同一份原生数据已经失败过：跳过重复重试，等签名变化、健康检查或用户操作。
+            if (archiveView.failedSignature === signature) return;
+
             const wrapper = nativeList.parentElement?.querySelector('.my-folded-wrapper');
 
             if (wrapper && wrapper.isConnected
@@ -1307,6 +1461,7 @@ function setArchiveRenderLimit(value) {
 
             buildArchive(nativeList, signature);
         } catch (error) {
+            archiveView.failedSignature = signature;
             console.warn('[ST-档案馆] 重建首页档案馆失败', error);
             // 壳已经插进去了就再给一次机会；连壳都没有则立刻回退，避免纯白屏。
             if (!archiveView.wrapper?.isConnected) {
