@@ -102,13 +102,9 @@
 </p>
 
 ### 部分书签效果展示
-| <img src="https://github.com/user-attachments/assets/bf5a3463-0ee2-498c-885f-8b934fbb95e9" width="320"> | <img src="https://github.com/user-attachments/assets/d6962260-e3d0-48ed-8860-cc31475b258a" width="320"> |
-| :-------------------------------------------: | :-------------------------------------------: |
-|                   朋友圈模板                   |                   晋江评论区                   |
-
-| <img src="https://github.com/user-attachments/assets/fa829458-08f9-4e24-87ee-da84f909b751" width="320"> |
-| :-------------------------------------------: |
-|                   明信片模板                   |
+| <img src="https://github.com/user-attachments/assets/bf5a3463-0ee2-498c-885f-8b934fbb95e9" width="320"> | <img src="https://github.com/user-attachments/assets/d6962260-e3d0-48ed-8860-cc31475b258a" width="320"> | <img src="https://github.com/user-attachments/assets/fa829458-08f9-4e24-87ee-da84f909b751" width="320"> |
+| :-------------------------------------------: | :-------------------------------------------: | :-------------------------------------------: |
+|                   朋友圈模板                   |                   晋江评论区                   |                   明信片模板                   |
 
 ## 安装方法
 
