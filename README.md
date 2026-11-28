@@ -114,10 +114,7 @@
 3. 粘贴本仓库的链接，点击确认即可。
 
 ### 方法二：手动安装
-将本仓库的 `manifest.json`、`index.js`、`style.css` 放入酒馆的 `public/scripts/extensions/third-party/ST-Archive` 目录下，重启酒馆。
-
-## 叠甲
-本扩展为作者根据个人喜好深度定制的 UI 扩展，代码撰写和测试均在pc端进行，不保证与所有酒馆版本/主题完美兼容，不提供任何技术支持，不定期更新。如果觉得好看并认为项目没有问题，欢迎使用。
+将本仓库的文件放入酒馆的 `public/scripts/extensions/third-party/ST-Archive` 目录下，重启酒馆。
 
 ## 兼容性与测试环境
 
