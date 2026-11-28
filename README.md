@@ -85,7 +85,8 @@
 <p align="center">
   <img width="2549" height="1403" alt="image" src="https://github.com/user-attachments/assets/05501799-a080-4194-a6e8-30f02f10cade" width="90%" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);" />
   <em>PC端-首页</em>
-  <p align="center">
+</p>
+<p align="center">
   <img width="1156" height="152" alt="image" src="https://github.com/user-attachments/assets/58f6589e-083d-477b-a752-810fbf11fd43" width="90%" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);" />
   <em>PC端-划线收藏</em>
 </p>
@@ -125,6 +126,15 @@
 - 底层逻辑/架构支持：DeepSeek
 
 ## 更新日志
+### V1.11.0
+- 排查代码漏洞，增加异常处理，若代码渲染失败则后台静默，不再强制接管首页。
+- 插件渲染失败后后台自动监测并尝试恢复接管，条件恢复后自动重新渲染。
+- 增加局部隔离，一个功能出问题不影响其他功能。
+- 本次优化不改变之前的功能，没有引入明显的额外性能开销。
+
+### V1.10.0
+- 去除导出书签标题的char名字，去除固定占位字符串。微调明信片布局，增加两种模板：晋江评论区、朋友圈
+
 ### v1.9.0
 - 导出新增两套模板：**明信片**（固定 1080×1080，邮票格 / 竖排标题 / 头像 / To·From）与**日记**（叠纸、横格线、右下旋转便签，高度随正文增长，左侧不打孔）。
 - 模板选择现在共 6 套，内容区可纵向滑动。
