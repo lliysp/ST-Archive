@@ -81,7 +81,9 @@
 
 
 ## 界面预览
-预览设备：SillyTavern v1.19.0，主题 Dark Lite，pc端 windows11(Edge浏览器),android移动端(Edge浏览器)
+### 预览设备：SillyTavern v1.19.0，主题 Dark Lite，pc端 windows11(Edge浏览器),android移动端(Edge浏览器)
+
+### 基础功能展示
 <p align="center">
   <img width="2549" height="1403" alt="image" src="https://github.com/user-attachments/assets/05501799-a080-4194-a6e8-30f02f10cade" width="90%" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);" />
   <em>PC端-首页</em>
@@ -98,6 +100,15 @@
   <img width="2549" height="1403" alt="image" src="https://github.com/user-attachments/assets/794ee6f3-1017-480e-bd16-7058c03537d3" width="90%" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);" />
   <em>PC端-剧情索引</em>
 </p>
+
+### 部分书签效果展示
+| <img src="https://github.com/user-attachments/assets/bf5a3463-0ee2-498c-885f-8b934fbb95e9" width="320"> | <img src="https://github.com/user-attachments/assets/d6962260-e3d0-48ed-8860-cc31475b258a" width="320"> |
+| :-------------------------------------------: | :-------------------------------------------: |
+|                   朋友圈模板                   |                   晋江评论区                   |
+
+| <img src="https://github.com/user-attachments/assets/fa829458-08f9-4e24-87ee-da84f909b751" width="320"> |
+| :-------------------------------------------: |
+|                   明信片模板                   |
 
 ## 安装方法
 
